@@ -6,6 +6,8 @@
   <img src="docs/images/ims_integration.svg" alt="Ella IMS with Ella Core"/>
 </p>
 
+[![ella-ims](https://snapcraft.io/ella-ims/badge.svg)](https://snapcraft.io/ella-ims)
+
 ## Key Features
 
 - Voice & Video calls
@@ -23,7 +25,7 @@
 ### Install
 
 ```sh
-sudo snap install ella-ims --edge
+sudo snap install ella-ims
 sudo snap connect ella-ims:network-control
 sudo vi /var/snap/ella-ims/common/ims.yaml
 sudo snap start --enable ella-ims.imsd
