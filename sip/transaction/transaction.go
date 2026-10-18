@@ -70,6 +70,13 @@ type Config struct {
 	T1, T2, T4 time.Duration
 
 	Clock Clock
+
+	// Scheduler starts the tasks of the layer and of the agents on it; GoScheduler without one.
+	Scheduler Scheduler
+
+	// Network carries the messages between the addresses the layer serves or attaches and those of the other layers
+	// on it; without one, the layer has a network of its own.
+	Network *Network
 }
 
 type Layer struct {
@@ -77,6 +84,8 @@ type Layer struct {
 	log      *slog.Logger
 	tr       *transport.Transport
 	clock    Clock
+	sched    Scheduler
+	network  *Network
 	aliases  map[string]struct{}
 	filter   func(m sip.Message) error
 	respFlow func(req *sip.Request, res *sip.Response) (sip.Flow, bool, error)
@@ -87,11 +96,15 @@ type Layer struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu      sync.Mutex
-	closed  bool
-	locals  map[netip.AddrPort]struct{}
-	peers   map[netip.AddrPort]func(sip.Message)
-	lanes   map[sip.Flow]*lane
+	mu     sync.Mutex
+	closed bool
+	locals map[netip.AddrPort]struct{}
+	lanes  map[sip.Flow]*lane
+
+	outboxes map[sip.Flow]*outbox
+
+	// drained, while not nil, closes once the outboxes are empty, for Shutdown.
+	drained chan struct{}
 	clients map[clientKey]*ClientTransaction
 	servers map[serverKey]*ServerTransaction
 	pending map[branchKey]*ServerTransaction
@@ -125,6 +138,8 @@ func New(cfg Config) *Layer {
 		h:        cfg.Handler,
 		log:      cfg.Logger,
 		clock:    cfg.Clock,
+		sched:    cfg.Scheduler,
+		network:  cfg.Network,
 		aliases:  make(map[string]struct{}),
 		filter:   cfg.Filter,
 		respFlow: cfg.ResponseFlow,
@@ -133,8 +148,8 @@ func New(cfg Config) *Layer {
 		t2:       cfg.T2,
 		t4:       cfg.T4,
 		locals:   make(map[netip.AddrPort]struct{}),
-		peers:    make(map[netip.AddrPort]func(sip.Message)),
 		lanes:    make(map[sip.Flow]*lane),
+		outboxes: make(map[sip.Flow]*outbox),
 		clients:  make(map[clientKey]*ClientTransaction),
 		servers:  make(map[serverKey]*ServerTransaction),
 		pending:  make(map[branchKey]*ServerTransaction),
@@ -150,6 +165,14 @@ func New(cfg Config) *Layer {
 
 	if l.clock == nil {
 		l.clock = SystemClock{}
+	}
+
+	if l.sched == nil {
+		l.sched = GoScheduler{}
+	}
+
+	if l.network == nil {
+		l.network = NewNetwork()
 	}
 
 	if l.t1 <= 0 {
@@ -180,6 +203,20 @@ func New(cfg Config) *Layer {
 	return l
 }
 
+// Clock is the clock of the timers of the layer, for the timers of its users to run on the same one.
+func (l *Layer) Clock() Clock {
+	return l.clock
+}
+
+// Scheduler starts the tasks of the layer, for the agents on it to start theirs on the same one.
+func (l *Layer) Scheduler() Scheduler {
+	return l.sched
+}
+
+func (l *Layer) T2() time.Duration {
+	return l.t2
+}
+
 func (l *Layer) T1() time.Duration {
 	return l.t1
 }
@@ -199,22 +236,22 @@ func (l *Layer) Listen(ctx context.Context, local netip.AddrPort) (netip.AddrPor
 
 func (l *Layer) SendAck(ctx context.Context, ack *sip.Request) error {
 	if ack.Method != "ACK" {
-		return fmt.Errorf("sip/transaction: SendAck of a %s request", ack.Method)
+		return errNotAck(ack)
 	}
 
-	return l.send(ctx, ack, false)
+	return l.sendInOrder(ctx, ack, false)
 }
 
 func (l *Layer) SendResponse(ctx context.Context, res *sip.Response) error {
-	return l.send(ctx, res, false)
+	return l.sendInOrder(ctx, res, false)
 }
 
 func (l *Layer) SendOnFlow(ctx context.Context, m sip.Message) error {
-	return l.send(ctx, m, true)
+	return l.sendInOrder(ctx, m, true)
 }
 
 func (l *Layer) CloseFlow(f sip.Flow) {
-	if _, ok := l.inMemory(f.Remote); ok {
+	if l.inMemory(f.Remote) {
 		return
 	}
 
@@ -246,6 +283,8 @@ func (l *Layer) Close() error {
 	for _, tx := range servers {
 		tx.shutdown()
 	}
+
+	l.network.unbind(l)
 
 	l.cancel()
 	l.wg.Wait()
@@ -486,7 +525,11 @@ func (l *Layer) sendStateless(req *sip.Request, res *sip.Response) {
 
 	res.Flow = f
 
-	l.spawn(func() {
+	l.enqueue(f, func(ok bool) {
+		if !ok {
+			return
+		}
+
 		if err := l.send(l.ctx, res, exact); err != nil {
 			l.log.Debug("stateless response failed", slog.String("response", res.StartLine()), slog.Any("error", err))
 		}
@@ -498,25 +541,13 @@ func (l *Layer) Go(f func(ctx context.Context)) error {
 		return ErrClosed
 	}
 
-	go func() {
+	l.sched.Go(func() {
 		defer l.wg.Done()
 
 		f(l.ctx)
-	}()
+	})
 
 	return nil
-}
-
-func (l *Layer) spawn(f func()) {
-	if !l.enter() {
-		return
-	}
-
-	go func() {
-		defer l.wg.Done()
-
-		f()
-	}()
 }
 
 func (l *Layer) isStatelessAck(ack *sip.Request) bool {
@@ -630,6 +661,10 @@ func normalizeHost(host string) string {
 	}
 
 	return strings.ToLower(host)
+}
+
+func errNotAck(req *sip.Request) error {
+	return fmt.Errorf("sip/transaction: SendAck of a %s request", req.Method)
 }
 
 func errInvalid(res *sip.Response, why string) error {

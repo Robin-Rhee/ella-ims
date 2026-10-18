@@ -8,8 +8,13 @@ import (
 	"github.com/ellanetworks/ims/sip/transaction"
 )
 
+// Clock is a fake clock: time passes by Advance only.
 type Clock struct {
 	advance sync.Mutex
+
+	// settle, on the clock of a Net, waits for the tasks of the net: Advance runs each timer once those its
+	// predecessor started are done.
+	settle func()
 
 	mu     sync.Mutex
 	now    time.Duration
@@ -39,16 +44,30 @@ func (c *Clock) AfterFunc(d time.Duration, f func()) transaction.Timer {
 	return t
 }
 
-func (c *Clock) Now() time.Duration {
+// epoch is the time of a fake clock before it advances.
+var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// Now is the fake time: epoch plus the time the clock advanced.
+func (c *Clock) Now() time.Time {
+	return epoch.Add(c.Elapsed())
+}
+
+// Elapsed is the time the clock advanced.
+func (c *Clock) Elapsed() time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	return c.now
 }
 
+// Advance advances the clock by d, running the timers due in the order of their time, then of their arming. On the
+// clock of a Net, the tasks under way finish first, and each timer runs once those the previous one started are done:
+// a timer may arm the next one, which runs in turn if due.
 func (c *Clock) Advance(d time.Duration) {
 	c.advance.Lock()
 	defer c.advance.Unlock()
+
+	c.quiesce()
 
 	c.mu.Lock()
 
@@ -66,11 +85,31 @@ func (c *Clock) Advance(d time.Duration) {
 
 		c.mu.Unlock()
 		t.f()
+		c.quiesce()
 		c.mu.Lock()
 	}
 
 	c.now = end
 	c.mu.Unlock()
+}
+
+// Next is the time until the next timer, if one is armed.
+func (c *Clock) Next() (time.Duration, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	i := c.next(1<<63 - 1)
+	if i < 0 {
+		return 0, false
+	}
+
+	return c.timers[i].when - c.now, true
+}
+
+func (c *Clock) quiesce() {
+	if c.settle != nil {
+		c.settle()
+	}
 }
 
 func (c *Clock) Pending() int {
