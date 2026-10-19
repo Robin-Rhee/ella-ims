@@ -155,10 +155,12 @@ func (m *Media) RTPMaps() ([]RTPMap, error) {
 	return out, errors.Join(errs...)
 }
 
+// Fmtp is the parameters of the fmtp attribute of a format of the media, the format compared case-insensitively
+// (RFC 4855 §3): a client writes the "MCPTT" of its m= line "mcptt" (TS 24.379 Table A.1.3-1).
 func (m *Media) Fmtp(format string) (string, bool) {
 	for _, v := range m.Attrs("fmtp") {
 		f, params := cutWSP(v)
-		if f == format {
+		if strings.EqualFold(f, format) {
 			return params, true
 		}
 	}
@@ -425,4 +427,55 @@ func cutWSP(s string) (before, after string) {
 	}
 
 	return s[:i], trimWSP(s[i:])
+}
+
+// SourceAttr is a source-level attribute (RFC 5576 §4.1): "a=ssrc:<ssrc-id> <attribute>[:<value>]".
+type SourceAttr struct {
+	SSRC        uint32
+	Name, Value string
+}
+
+func ParseSourceAttr(v string) (SourceAttr, error) {
+	id, attr := cutWSP(v)
+
+	ssrc, err := strconv.ParseUint(id, 10, 32)
+	if err != nil || !isDigits(id) {
+		return SourceAttr{}, fmt.Errorf("ssrc:%q: invalid ssrc-id", v)
+	}
+
+	name, value, _ := strings.Cut(attr, ":")
+	if !isToken(name) {
+		return SourceAttr{}, fmt.Errorf("ssrc:%q: invalid attribute", v)
+	}
+
+	return SourceAttr{SSRC: uint32(ssrc), Name: name, Value: value}, nil
+}
+
+func (a SourceAttr) String() string {
+	s := strconv.FormatUint(uint64(a.SSRC), 10) + " " + a.Name
+	if a.Value != "" {
+		s += ":" + a.Value
+	}
+
+	return s
+}
+
+// SourceAttrs are the a=ssrc attributes of the media, in order; the malformed ones are left out and reported.
+func (m *Media) SourceAttrs() ([]SourceAttr, error) {
+	var (
+		out  []SourceAttr
+		errs []error
+	)
+
+	for _, v := range m.Attrs("ssrc") {
+		a, err := ParseSourceAttr(v)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		out = append(out, a)
+	}
+
+	return out, errors.Join(errs...)
 }

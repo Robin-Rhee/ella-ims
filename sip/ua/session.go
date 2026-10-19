@@ -79,6 +79,9 @@ const (
 	EndNoSubscription
 	// EndRemoved: the application removed the publication (RFC 3903 §4.5).
 	EndRemoved
+	// EndFailed: a local failure, of the agent or the application, ended it, the peer still knowing it; End.Err
+	// tells which: an ACK that could not be sent, a NOTIFY that could not be built.
+	EndFailed
 )
 
 func (c EndCause) String() string {
@@ -111,13 +114,15 @@ func (c EndCause) String() string {
 		return "no subscription"
 	case EndRemoved:
 		return "removed"
+	case EndFailed:
+		return "failed"
 	}
 
 	return "EndCause(?)"
 }
 
 // End is how a session or a subscription ended. The causes of a session are EndBye, EndCancelled, EndRejected,
-// EndNotChosen, EndTimeout, EndLost, EndExpired and EndClosed; a subscription has the others as well.
+// EndNotChosen, EndTimeout, EndLost, EndExpired, EndClosed and EndFailed; a subscription has the others as well.
 type End struct {
 	Cause EndCause
 
@@ -218,6 +223,9 @@ type Session struct {
 
 	// unreported are the reliable 1xx whose PRACK has not completed yet, reported in order once it has.
 	unreported []*sip.Response
+
+	// log is the logger of the dialog, made once.
+	log *slog.Logger
 }
 
 type pendingBye struct {
@@ -396,7 +404,7 @@ func (s *Session) reply(tx *transaction.ServerTransaction, code int, extra ...si
 	s.decorate(res)
 
 	if err := s.a.respond(tx, res); err != nil {
-		s.a.log.Debug("response failed", slog.Int("code", code), slog.Any("error", err))
+		s.logger().Debug("response failed", slog.Int("code", code), slog.Any("error", err))
 	}
 }
 
@@ -602,17 +610,17 @@ func (s *Session) transmit(req *sip.Request, h transaction.ClientHandler, sent f
 func (s *Session) queueAck(ack *sip.Request) {
 	if err := s.a.layer.QueueAck(ack, func(err error) {
 		if err != nil {
-			s.a.log.Debug("ACK failed", slog.Any("error", err))
+			s.logger().Debug("ACK failed", slog.Any("error", err))
 		}
 	}); err != nil {
-		s.a.log.Debug("ACK not sent", slog.Any("error", err))
+		s.logger().Debug("ACK not sent", slog.Any("error", err))
 	}
 }
 
 // sendRequest sends a request of the session, logging a failure.
 func (s *Session) sendRequest(req *sip.Request, h transaction.ClientHandler) {
 	if err := s.transmit(req, h, nil); err != nil {
-		s.a.log.Debug("request failed", slog.String("method", req.Method), slog.Any("error", err))
+		s.logger().Debug("request failed", slog.String("method", req.Method), slog.Any("error", err))
 
 		if h != nil {
 			h.HandleError(err)
@@ -818,7 +826,7 @@ func (s *Session) deliver(r *Request) {
 		}
 
 		if method != "OPTIONS" && method != "INVITE" && method != "UPDATE" && method != "PRACK" {
-			s.a.log.Warn("no Handler.Request for a method the agent allows", slog.String("method", method))
+			s.logger().Warn("no Handler.Request for a method the agent allows", slog.String("method", method))
 		}
 
 		_ = r.RespondDefault()
@@ -864,7 +872,7 @@ func (s *Session) receiveOffer(tx *transaction.ServerTransaction, req *sip.Reque
 		s.decorate(res)
 
 		if err := tx.Respond(res); err != nil {
-			s.a.log.Debug("422 failed", slog.Any("error", err))
+			s.logger().Debug("422 failed", slog.Any("error", err))
 		}
 
 		return
@@ -885,7 +893,7 @@ func (s *Session) receiveOffer(tx *transaction.ServerTransaction, req *sip.Reque
 
 	if r.refresh && s.policy.AnswerRefreshes && onlySDP(req.Envelope) {
 		if err := r.answerUnchanged(Change{}); err != nil {
-			s.a.log.Debug("refresh failed", slog.Any("error", err))
+			s.logger().Debug("refresh failed", slog.Any("error", err))
 		}
 
 		return

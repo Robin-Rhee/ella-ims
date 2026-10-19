@@ -108,6 +108,9 @@ type Subscription struct {
 
 	// inflight are its SUBSCRIBEs in progress, completed with ErrState should the subscription end first.
 	inflight map[*subscribeRequest]struct{}
+
+	// log is the logger of the dialog, made once.
+	log *slog.Logger
 }
 
 type subscribeKey struct {
@@ -703,7 +706,7 @@ func (s *Subscription) expireNow() {
 
 func (s *Subscription) autoRefresh() {
 	if err := s.subscribe(false, Change{}, nil); err != nil {
-		s.a.log.Debug("subscription refresh failed", slog.Any("error", err))
+		s.logger().Debug("subscription refresh failed", slog.Any("error", err))
 		s.retryRefresh()
 	}
 }
