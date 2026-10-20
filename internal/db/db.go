@@ -69,7 +69,7 @@ var migrations = []string{
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		impi TEXT NOT NULL,
 		impu TEXT NOT NULL,
-		subscriber TEXT NOT NULL CHECK (subscriber IN ('ue', 'pcscf')),
+		subscriber TEXT NOT NULL CHECK (subscriber IN ('ue', 'pcscf', 'as')),
 		call_id TEXT NOT NULL,
 		local_tag TEXT NOT NULL,
 		remote_tag TEXT NOT NULL,
@@ -77,6 +77,8 @@ var migrations = []string{
 		dialog BLOB NOT NULL,
 		version INTEGER NOT NULL,
 		expires_at INTEGER NOT NULL,
+		icid TEXT NOT NULL,
+		term_ioi TEXT NOT NULL,
 		UNIQUE (call_id, local_tag, remote_tag)
 	);
 	CREATE INDEX reg_subscriptions_impi ON reg_subscriptions (impi);

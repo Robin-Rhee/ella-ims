@@ -185,7 +185,7 @@ func (s *Sessions) next(ctx context.Context, tx *transaction.ServerTransaction, 
 		s.log.Debug("request to an unregistered user", slog.String("impu", c.served.URI.String()))
 		s.answer(tx, sip.NewResponse(tx.Request(), 480, ""))
 	default:
-		s.deliver(tx, out, c, !first)
+		s.deliver(ctx, tx, out, c, !first)
 	}
 }
 
@@ -230,6 +230,8 @@ func (s *Sessions) toAS(ctx context.Context, tx *transaction.ServerTransaction, 
 
 	r.Header.Del("P-Served-User")
 	r.Header.Add("P-Served-User", servedUser(c))
+
+	s.r.toASCharging(&r.Header)
 
 	if c.token != "" {
 		withRegistrationToken(&r.Header, c.token)

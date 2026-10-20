@@ -20,6 +20,7 @@ func testSubscription() RegSubscription {
 		Dialog:       []byte(`{"ID":{}}`),
 		Version:      0,
 		ExpiresAt:    testNow.Add(time.Hour),
+		ICID:         "icid-1",
 	}
 }
 
@@ -54,6 +55,7 @@ func TestRegSubscriptionLifecycle(t *testing.T) {
 	want.Version = 3
 	want.RemoteTarget = "sip:[2001:db8::2]:5100"
 	want.ExpiresAt = testNow.Add(2 * time.Hour)
+	want.TermIOI = "as.example.net"
 
 	if err := d.UpdateRegSubscription(ctx, want); err != nil {
 		t.Fatalf("UpdateRegSubscription: %v", err)
@@ -95,7 +97,7 @@ func TestPutRegSubscriptionErrors(t *testing.T) {
 
 	bad := testSubscription()
 	bad.CallID = "sub-2"
-	bad.Subscriber = "as"
+	bad.Subscriber = "icscf"
 
 	if _, err := d.PutRegSubscription(ctx, bad); err == nil {
 		t.Fatal("PutRegSubscription accepted an unknown subscriber")
