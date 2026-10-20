@@ -255,16 +255,16 @@ func protocolError(ans *diameter.Message) uint32 {
 	return code
 }
 
-// TS 29.214 §4.4.5, §5.3.13
+// TS 29.214 §4.4.5, §5.3.13: the AF signalling component, Media-Component-Number 0, of one Media-Sub-Component of
+// Flow-Number 0 and Flow-Usage AF_SIGNALLING, "the rest of AVPs within the Media-Component-Description and
+// Media-Sub-Component AVPs shall not be used": no Media-Type.
 func (b *Backend) OpenSignalling(ctx context.Context, id string, s policy.Signalling, wait bool) (string, error) {
 	initial := rx.RequestInitial
-	control := rx.MediaControl
 	signalling := rx.FlowUsageAFSignalling
 
 	r := rx.AARequest{
 		MediaComponents: []rx.MediaComponent{{
 			Number:        0,
-			Type:          &control,
 			SubComponents: []rx.MediaSubComponent{{FlowNumber: 0, FlowUsage: &signalling}},
 		}},
 		SpecificActions: []rx.SpecificAction{rx.ActionIndicationOfLossOfBearer, rx.ActionIndicationOfReleaseOfBearer},
