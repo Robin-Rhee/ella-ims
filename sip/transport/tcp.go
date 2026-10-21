@@ -138,6 +138,9 @@ func (t *Transport) dial(c *conn) {
 		},
 	}
 
+	// Plain TCP, as the listeners (listen.Pair), whatever GODEBUG=multipathtcp says.
+	d.SetMultipathTCP(false)
+
 	nc, err := t.dialFunc(t.ctx, &d, network("tcp", c.flow.Remote.Addr()), c.flow.Remote.String())
 
 	// The kernel refuses the flow's 4-tuple while the peer's connection of the same flow holds it, established but not
@@ -194,18 +197,32 @@ func (t *Transport) awaitAccept(c *conn) {
 func (t *Transport) accept(l *listener) {
 	defer t.wg.Done()
 
+	var backoff time.Duration
+
 	for {
 		nc, err := l.tcp.AcceptTCP()
 		if errors.Is(err, net.ErrClosed) {
 			return
 		}
 
+		if err != nil && socketFailed(err) {
+			t.fail(l, err)
+			return
+		}
+
 		if err != nil {
-			t.log.Warn("SIP accept failed", slog.String("local", l.local.String()), slog.Any("error", err))
-			time.Sleep(50 * time.Millisecond)
+			backoff = retryBackoff(backoff)
+			t.log.Warn("SIP accept failed", slog.String("local", l.local.String()), slog.Any("error", err),
+				slog.Duration("retry", backoff))
+
+			if !t.pause(backoff) {
+				return
+			}
 
 			continue
 		}
+
+		backoff = 0
 
 		f := sip.Flow{Transport: sip.TCP, Local: l.local, Remote: unmap(nc.RemoteAddr().(*net.TCPAddr).AddrPort())}
 		c := &conn{flow: f, ready: make(chan struct{}), nc: nc}

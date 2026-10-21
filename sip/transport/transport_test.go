@@ -7,11 +7,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -802,5 +804,121 @@ func TestPingTCP(t *testing.T) {
 
 	if err := a.Ping(ctx, f); err != nil {
 		t.Fatalf("Ping: %v", err)
+	}
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.b.String()
+}
+
+type listenerFailure struct {
+	local netip.AddrPort
+	err   error
+}
+
+// failures has a transport report its listener failures on the channel it returns.
+func failures(cfg *transport.Config) <-chan listenerFailure {
+	ch := make(chan listenerFailure, 4)
+	cfg.OnListenerFailed = func(local netip.AddrPort, err error) { ch <- listenerFailure{local, err} }
+
+	return ch
+}
+
+func awaitFailure(t *testing.T, ch <-chan listenerFailure) listenerFailure {
+	t.Helper()
+
+	select {
+	case f := <-ch:
+		return f
+	case <-time.After(siptest.Timeout):
+		t.Fatal("no listener failure reported")
+	}
+
+	return listenerFailure{}
+}
+
+// A listening socket that stopped listening, as one Android destroyed with its network (accept fails with EINVAL),
+// never recovers: its listener is closed, forgotten and reported, rather than accept retried; sends from it fail, and
+// its address can be listened on again.
+func TestBrokenListenerIsDropped(t *testing.T) {
+	var logs syncBuffer
+
+	cfg := transport.Config{Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	failed := failures(&cfg)
+	tr, _ := siptest.NewTransport(t, cfg)
+	local := siptest.Listen(t, tr, lo)
+
+	rcs, err := tr.Sockets(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Linux: a listening socket shut down is no longer listening; accept fails with EINVAL.
+	var shut error
+	if err := rcs[1].Control(func(fd uintptr) { shut = syscall.Shutdown(int(fd), syscall.SHUT_RD) }); err != nil || shut != nil {
+		t.Fatalf("shutdown: %v, %v", err, shut)
+	}
+
+	if f := awaitFailure(t, failed); f.local != local || !errors.Is(f.err, syscall.EINVAL) {
+		t.Fatalf("failure of %s: %v; want %s, EINVAL", f.local, f.err, local)
+	}
+
+	ctx := context.Background()
+	req := siptest.NewRequest("OPTIONS", "sip:a@127.0.0.1", sip.UDP, local)
+	req.Flow = sip.Flow{Transport: sip.UDP, Local: local, Remote: netip.MustParseAddrPort("127.0.0.1:9")}
+
+	if err := tr.Send(ctx, req); !errors.Is(err, transport.ErrNoListener) {
+		t.Fatalf("Send from the broken listener: err = %v, want %v", err, transport.ErrNoListener)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	if n := strings.Count(logs.String(), "SIP accept failed"); n != 0 {
+		t.Errorf("accept retried %d times on the broken listener", n)
+	}
+
+	if n := strings.Count(logs.String(), "SIP listener failed"); n != 1 {
+		t.Errorf("listener failure logged %d times, want once", n)
+	}
+
+	select {
+	case f := <-failed:
+		t.Fatalf("failure reported again: %s: %v", f.local, f.err)
+	default:
+	}
+
+	if _, err := tr.Listen(ctx, local); err != nil {
+		t.Fatalf("listen again on %s: %v", local, err)
+	}
+}
+
+// Closing the transport closes its listeners: no failure.
+func TestCloseIsNoListenerFailure(t *testing.T) {
+	cfg := transport.Config{}
+	failed := failures(&cfg)
+	tr, _ := siptest.NewTransport(t, cfg)
+	siptest.Listen(t, tr, lo)
+
+	_ = tr.Close()
+
+	select {
+	case f := <-failed:
+		t.Fatalf("Close reported a failure of %s: %v", f.local, f.err)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
