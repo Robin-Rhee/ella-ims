@@ -2,6 +2,8 @@ package scscf
 
 import (
 	"log/slog"
+	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"github.com/ellanetworks/core/diameter/cx"
@@ -177,6 +179,8 @@ func TestServicePointTriggers(t *testing.T) {
 	invite.Header.Add("P-Asserted-Service", "urn:urn-7:3gpp-service.ims.icsi.mcptt")
 	invite.Header.Add("Supported", "timer,  100rel")
 	invite.Header.Add("Date", "Sat, 13 Nov 2010 23:29:00 GMT")
+	invite.Header.Add("Subject", "Group\t call,  \tnow")
+	invite.Header.Add("Organization", "Ella Networks")
 	invite.Header.Add("P-Early-Media", `supported ;  "quoted  text" , gated`)
 	invite.SetBody("application/sdp", []byte("v=0\r\nm=audio 4000 RTP/AVP 0\r\nm=application 4002 udp MCPTT\r\n"))
 
@@ -208,6 +212,13 @@ func TestServicePointTriggers(t *testing.T) {
 		}, true},
 		{"a header that is no list", trigger{req: invite}, cx.ServicePointTrigger{
 			SIPHeader: &cx.HeaderMatch{Header: "^Date$", Content: ptr(`^Sat, 13 Nov 2010`)},
+		}, true},
+		// RFC 3261 §25.1: LWS is SP, HTAB and line folding; the white space of UTF-8 text is part of the value.
+		{"tabs are LWS", trigger{req: invite}, cx.ServicePointTrigger{
+			SIPHeader: &cx.HeaderMatch{Header: "^Subject$", Content: ptr(`^Group call, now$`)},
+		}, true},
+		{"a no-break space is no LWS", trigger{req: invite}, cx.ServicePointTrigger{
+			SIPHeader: &cx.HeaderMatch{Header: "^Organization$", Content: ptr("^Ella Networks$")},
 		}, true},
 		{"session case", trigger{req: invite, sescase: cx.SessionCaseTerminatingUnregistered}, cx.ServicePointTrigger{
 			SessionCase: ptr(cx.SessionCaseTerminatingUnregistered),
@@ -367,6 +378,68 @@ func TestCanonicalIdentity(t *testing.T) {
 
 		if got := canonicalIdentity(u); got != tt.want {
 			t.Errorf("canonicalIdentity(%s) = %s, want %s", tt.in, got, tt.want)
+		}
+	}
+}
+
+// referenceMatches is the evaluation of a trigger point as TS 29.228 Annex B.2.2 states it: every SPT checked, its
+// value put in each of its groups, and the groups combined.
+func referenceMatches(t trigger, tp *cx.TriggerPoint) bool {
+	if tp == nil {
+		return true
+	}
+
+	groups := make(map[int32][]bool)
+
+	var order []int32
+
+	for _, s := range tp.ServicePointTriggers {
+		v := t.condition(s) != s.Negated
+
+		for _, g := range s.Groups {
+			if _, ok := groups[g]; !ok {
+				order = append(order, g)
+			}
+
+			groups[g] = append(groups[g], v)
+		}
+	}
+
+	for _, g := range order {
+		met := !slices.Contains(groups[g], false)
+		if tp.ConjunctiveNormalForm {
+			met = slices.Contains(groups[g], true)
+		}
+
+		if met != tp.ConjunctiveNormalForm {
+			return met
+		}
+	}
+
+	return tp.ConjunctiveNormalForm
+}
+
+// TS 29.228 Annex B.2.2: the SPTs checked lazily, group by group, give the trigger point the value of its definition,
+// with SPTs in several groups, in none, and more of them than matches keeps on the stack.
+func TestTriggerPointGroups(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	tr := trigger{req: annexCRequest("INVITE", "<sip:ann@homedomain.com>")}
+
+	for range 20000 {
+		tp := &cx.TriggerPoint{ConjunctiveNormalForm: rng.IntN(2) == 0}
+
+		for range rng.IntN(24) {
+			s := cx.ServicePointTrigger{Negated: rng.IntN(2) == 0, Method: ptr([]string{"INVITE", "MESSAGE"}[rng.IntN(2)])}
+
+			for range rng.IntN(4) {
+				s.Groups = append(s.Groups, int32(rng.IntN(5)))
+			}
+
+			tp.ServicePointTriggers = append(tp.ServicePointTriggers, s)
+		}
+
+		if got, want := tr.matches(tp), referenceMatches(tr, tp); got != want {
+			t.Fatalf("matches(%+v) = %v, want %v", tp, got, want)
 		}
 	}
 }

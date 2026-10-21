@@ -181,7 +181,7 @@ func TestCallSessionEndsAtShutdown(t *testing.T) {
 	s, u, pcrf, _ := newRxIPsecScene(t)
 	e := s.establishConfirmed(t, u, pcrf)
 
-	s.p.Close()
+	_ = s.p.Close(context.Background())
 
 	pcrf.wantSTR(e.session, rx.TerminationAdministrative)
 }

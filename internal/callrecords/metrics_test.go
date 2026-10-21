@@ -1,6 +1,7 @@
 package callrecords
 
 import (
+	"context"
 	"testing"
 
 	"github.com/ellanetworks/ims/internal/db"
@@ -48,7 +49,8 @@ func TestRecorderMetricsOfDroppedRecords(t *testing.T) {
 	store.pause()
 
 	r := New(Config{Store: store, MaxUnsaved: 1, Clock: &tickClock{now: t0}})
-	t.Cleanup(r.Close)
+
+	t.Cleanup(func() { _ = r.Close(context.Background()) })
 	t.Cleanup(store.resume)
 
 	r.Attempt(attempt("KEPT"))
