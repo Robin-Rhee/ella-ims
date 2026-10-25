@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"github.com/ellanetworks/core/diameter/tgpp"
 	"github.com/ellanetworks/core/sctp"
 	"github.com/ellanetworks/ims/internal/config"
+	"github.com/ellanetworks/ims/internal/scscf"
 	"github.com/ellanetworks/ims/internal/settings"
 )
 
@@ -56,7 +58,7 @@ func (r *realms) of(app settings.Application) func() string {
 	return func() string { return r.st.Load().Realm(app) }
 }
 
-func newDiameterNode(cfg config.Diameter, s settings.Settings, handshake time.Duration, rtr *rtrHandler,
+func newDiameterNode(cfg config.Diameter, s settings.Settings, handshake time.Duration, cxh *cxHandler,
 	rxh *rxHandler, logger *slog.Logger,
 ) (*diameter.Node, error) {
 	op := s.Operator
@@ -72,7 +74,7 @@ func newDiameterNode(cfg config.Diameter, s settings.Settings, handshake time.Du
 			HostIPAddresses: []netip.Addr{cfg.Address},
 			ProductName:     productName,
 		},
-		Handler:           newDiameterMux(rtr, rxh),
+		Handler:           newDiameterMux(cxh, rxh),
 		HandshakeTimeout:  handshake,
 		OnPeerStateChange: func(p diameter.PeerStatus) { logPeerState(logger, p) },
 		Logger:            logger,
@@ -181,30 +183,34 @@ func diameterPeers(st settings.Settings, previous ...settings.Settings) []diamet
 	return out
 }
 
-func newDiameterMux(rtr *rtrHandler, rxh *rxHandler) *diameter.Mux {
+func newDiameterMux(cxh *cxHandler, rxh *rxHandler) *diameter.Mux {
 	mux := diameter.NewMux()
 
-	mux.Handle(cx.ApplicationID, cx.CommandRegistrationTermination, rtr)
+	mux.Handle(cx.ApplicationID, cx.CommandRegistrationTermination, diameter.HandlerFunc(cxh.registrationTermination))
+	mux.Handle(cx.ApplicationID, cx.CommandPushProfile, diameter.HandlerFunc(cxh.pushProfile))
 	mux.Handle(rx.ApplicationID, rx.CommandReAuth, diameter.HandlerFunc(rxh.reAuth))
 	mux.Handle(rx.ApplicationID, rx.CommandAbortSession, diameter.HandlerFunc(rxh.abortSession))
 
 	return mux
 }
 
-type terminator interface {
+// cxRegistrar is what the S-CSCF does of the requests of the HSS.
+type cxRegistrar interface {
 	Terminate(ctx context.Context, rtr cx.RegistrationTerminationRequest) ([]string, error)
+	PushProfile(ctx context.Context, ppr cx.PushProfileRequest) error
 }
 
-type rtrHandler struct {
+// cxHandler serves the requests of the HSS to the S-CSCF.
+type cxHandler struct {
 	log    *slog.Logger
-	target atomic.Pointer[terminator]
+	target atomic.Pointer[cxRegistrar]
 }
 
-func newRTRHandler(logger *slog.Logger) *rtrHandler {
-	return &rtrHandler{log: logger}
+func newCxHandler(logger *slog.Logger) *cxHandler {
+	return &cxHandler{log: logger}
 }
 
-func (h *rtrHandler) bind(t terminator) {
+func (h *cxHandler) bind(t cxRegistrar) {
 	if t == nil {
 		h.target.Store(nil)
 		return
@@ -213,7 +219,7 @@ func (h *rtrHandler) bind(t terminator) {
 	h.target.Store(&t)
 }
 
-func (h *rtrHandler) ServeDiameter(ctx context.Context, c *diameter.Conn, req *diameter.Message) *diameter.Message {
+func (h *cxHandler) registrationTermination(ctx context.Context, c *diameter.Conn, req *diameter.Message) *diameter.Message {
 	rtr, err := cx.ParseRegistrationTerminationRequest(req)
 	if err != nil {
 		h.log.Warn("invalid Cx RTR", slog.String("peer", c.PeerID()), slog.Any("error", err))
@@ -226,13 +232,18 @@ func (h *rtrHandler) ServeDiameter(ctx context.Context, c *diameter.Conn, req *d
 		return cx.NewAnswer(req, c.LocalIdentity(), tgpp.Result{Code: diameter.ResultUnableToComply}, 0)
 	}
 
+	if ans := featureUnsupported(req, c); ans != nil {
+		h.log.Warn("Cx RTR requires features the S-CSCF does not support", slog.String("impi", rtr.PrivateIdentity))
+		return ans
+	}
+
 	h.log.Debug("Cx RTR", slog.String("impi", rtr.PrivateIdentity), slog.Any("impus", rtr.PublicIdentities),
 		slog.String("reason", rtr.Reason.Code.String()))
 
 	associated, err := (*t).Terminate(ctx, rtr)
 	if err != nil {
 		h.log.Warn("Cx RTR failed", slog.String("impi", rtr.PrivateIdentity), slog.Any("error", err))
-		return cx.NewAnswer(req, c.LocalIdentity(), tgpp.Result{Code: diameter.ResultUnableToComply}, 0)
+		return cx.NewAnswer(req, c.LocalIdentity(), failure(err), 0)
 	}
 
 	a := cx.RegistrationTermination{AssociatedIdentities: associated}
@@ -245,6 +256,76 @@ func (h *rtrHandler) ServeDiameter(ctx context.Context, c *diameter.Conn, req *d
 
 	return ans
 }
+
+// TS 29.228 §6.2.2.1
+func (h *cxHandler) pushProfile(ctx context.Context, c *diameter.Conn, req *diameter.Message) *diameter.Message {
+	ppr, err := cx.ParsePushProfileRequest(req)
+	if err != nil {
+		h.log.Warn("invalid Cx PPR", slog.String("peer", c.PeerID()), slog.Any("error", err))
+		return cx.NewErrorAnswer(req, c.LocalIdentity(), err, 0)
+	}
+
+	t := h.target.Load()
+	if t == nil {
+		h.log.Warn("Cx PPR before the registrar started", slog.String("impi", ppr.PrivateIdentity))
+		return cx.NewAnswer(req, c.LocalIdentity(), tgpp.Result{Code: diameter.ResultUnableToComply}, 0)
+	}
+
+	if ans := featureUnsupported(req, c); ans != nil {
+		h.log.Warn("Cx PPR requires features the S-CSCF does not support", slog.String("impi", ppr.PrivateIdentity))
+		return ans
+	}
+
+	h.log.Debug("Cx PPR", slog.String("impi", ppr.PrivateIdentity), slog.Bool("userData", len(ppr.UserData) > 0),
+		slog.Bool("charging", ppr.Charging != nil), slog.Bool("allowedWebRTC", ppr.AllowedWebRTC != nil))
+
+	// The S-CSCF authenticates with IMS AKA only: SIP Digest authentication data is of no use to it, and changes
+	// nothing it serves (TS 29.228 §6.5.2.4).
+	if _, ok := req.Find(cx.AVPSIPAuthDataItem, tgpp.VendorID); ok {
+		h.log.Debug("Cx PPR: SIP Digest authentication data ignored", slog.String("impi", ppr.PrivateIdentity))
+	}
+
+	if err := (*t).PushProfile(ctx, ppr); err != nil {
+		h.log.Warn("Cx PPR failed", slog.String("impi", ppr.PrivateIdentity), slog.Any("error", err))
+		return cx.NewAnswer(req, c.LocalIdentity(), failure(err), 0)
+	}
+
+	ans, err := cx.NewPushProfileAnswer(req, c.LocalIdentity(), cx.PushProfile{})
+	if err != nil {
+		h.log.Warn("building the PPA failed", slog.String("impi", ppr.PrivateIdentity), slog.Any("error", err))
+		return cx.NewAnswer(req, c.LocalIdentity(), tgpp.Result{Code: diameter.ResultUnableToComply}, 0)
+	}
+
+	return ans
+}
+
+// failure is the result of a request of the HSS that failed (TS 29.228 Table 6.1.3.1.1, Table 6.2.2.1.1).
+func failure(err error) tgpp.Result {
+	switch {
+	case errors.Is(err, scscf.ErrUserUnknown):
+		return tgpp.Experimental(tgpp.ResultErrorUserUnknown)
+	case errors.Is(err, scscf.ErrUnsupportedUserData):
+		return tgpp.Experimental(tgpp.ResultErrorNotSupportedUserData)
+	default:
+		return tgpp.Result{Code: diameter.ResultUnableToComply}
+	}
+}
+
+// featureUnsupported is the answer to a request that requires features of the Cx application the S-CSCF does not
+// support: DIAMETER_ERROR_FEATURE_UNSUPPORTED, with the features it supports, none (TS 29.229 §7.2.1).
+func featureUnsupported(req *diameter.Message, c *diameter.Conn) *diameter.Message {
+	if !cx.RequiresUnsupportedFeatures(req, 0) {
+		return nil
+	}
+
+	ans := cx.NewAnswer(req, c.LocalIdentity(), tgpp.Experimental(tgpp.ResultErrorFeatureUnsupported), 0)
+	ans.AVPs = append(ans.AVPs, tgpp.SupportedFeatures{VendorID: tgpp.VendorID, FeatureListID: cxFeatureListID}.AVP())
+
+	return ans
+}
+
+// cxFeatureListID is the Feature-List-ID of the features of the Cx application (TS 29.229 §7.1.1).
+const cxFeatureListID = 1
 
 type rxSessions interface {
 	ReAuth(sessionID string, r rx.ReAuthRequest) bool

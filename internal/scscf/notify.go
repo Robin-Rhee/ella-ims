@@ -43,10 +43,28 @@ type removal struct {
 	calls map[bindingKey]map[*proxy.Dialog]proxy.Side
 }
 
+// rejection is the identities that the HSS removed from a registered set of a private identity, or barred in it, with
+// the contacts of the set, which the reg event reports terminated (TS 24.229 §5.4.1.8 step 4): unlike a removal, it
+// leaves the contacts bound, and their calls in progress (NOTE 2).
+type rejection struct {
+	impi       string
+	identities []db.PublicIdentity
+	bindings   []db.Binding
+}
+
 type change struct {
 	removed   []removal
+	rejected  rejection
 	reason    string
 	shortened string
+
+	// created are the keys of the public identities that the HSS added to a registered set of the user, or unbarred
+	// in it (TS 24.229 §5.4.1.8 step 1, §5.4.2.1.2 step 4e IV).
+	created map[string]bool
+
+	// ended, if set, reports whether the change ends the subscriptions to a resource: an identity the HSS removed
+	// from the set, or barred (TS 29.228 §6.5.2.1, RFC 6665 §4.2.2).
+	ended func(resource string) bool
 }
 
 type outgoing struct {
@@ -103,6 +121,8 @@ func (r *Registrar) notifySubscriptions(ctx context.Context, impi string, ch cha
 		case gone && byUE:
 			r.dropSubscription(ctx, s)
 			continue
+		case ch.ended != nil && ch.ended(s.IMPU):
+			state = "terminated;reason=" + reasonRejected
 		case !active:
 		case gone:
 			state = "terminated;reason=" + reasonNoResource
@@ -377,7 +397,17 @@ func (r *Registrar) reginfo(ctx context.Context, st *state, ch change) (reginfo.
 		}
 	}
 
+	if ch.rejected.impi == st.impi {
+		sets = append(sets, db.Registration{Identities: ch.rejected.identities})
+	}
+
 	seen := map[string]bool{}
+
+	// The contacts of an identity are those of the sets reported: one that left them, to another set, has none here.
+	ids := map[int64]bool{}
+	for _, set := range sets {
+		ids[set.SetID] = true
+	}
 
 	for _, set := range sets {
 		for _, id := range set.Identities {
@@ -387,7 +417,7 @@ func (r *Registrar) reginfo(ctx context.Context, st *state, ch change) (reginfo.
 
 			seen[id.Key] = true
 
-			reg, err := r.registrationElement(ctx, st, ch, id)
+			reg, err := r.registrationElement(ctx, st, ch, id, ids)
 			if err != nil {
 				return reginfo.Reginfo{}, err
 			}
@@ -399,7 +429,8 @@ func (r *Registrar) reginfo(ctx context.Context, st *state, ch change) (reginfo.
 	return info, nil
 }
 
-func (r *Registrar) registrationElement(ctx context.Context, st *state, ch change, id db.PublicIdentity) (reginfo.Registration, error) {
+func (r *Registrar) registrationElement(ctx context.Context, st *state, ch change, id db.PublicIdentity, sets map[int64]bool,
+) (reginfo.Registration, error) {
 	reg := reginfo.Registration{AOR: id.URI, ID: elementID("r", id.Key), State: reginfo.Terminated}
 
 	bound, err := r.cfg.DB.ListRegistrationsByIdentity(ctx, id.Key)
@@ -416,10 +447,22 @@ func (r *Registrar) registrationElement(ctx context.Context, st *state, ch chang
 	var active []bindingAt
 
 	for _, set := range bound {
+		if !sets[set.SetID] {
+			continue
+		}
+
+		// A set that bars the identity does not register it (TS 24.229 §5.4.1.8 step 2).
+		if slices.ContainsFunc(set.Identities, func(other db.PublicIdentity) bool { return other.Key == id.Key && other.Barred }) {
+			continue
+		}
+
 		for _, b := range liveAt(set.Bindings, st.now) {
 			event := reginfo.Refreshed
 
 			switch {
+			// A contact new to the identity is created, shortened or not (RFC 3680 §5.1).
+			case ch.created[id.Key]:
+				event = reginfo.Created
 			case ch.shortened != "" && set.IMPI == ch.shortened:
 				event = reginfo.Shortened
 			case b.Event != db.BindingRefreshed:
@@ -453,6 +496,14 @@ func (r *Registrar) registrationElement(ctx context.Context, st *state, ch chang
 			}
 
 			reg.Contacts = append(reg.Contacts, contactElement(b, id.Key, reginfo.Terminated, rm.event, st.now))
+		}
+	}
+
+	if holds(ch.rejected.identities, id.Key) {
+		for _, b := range ch.rejected.bindings {
+			if !slices.Contains(active, bindingAt{b.ID, b.RegisteredAt.UnixNano()}) {
+				reg.Contacts = append(reg.Contacts, contactElement(b, id.Key, reginfo.Terminated, reginfo.Rejected, st.now))
+			}
 		}
 	}
 

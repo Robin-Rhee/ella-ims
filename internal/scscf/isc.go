@@ -63,6 +63,11 @@ func (c *chain) originating() bool {
 	return false
 }
 
+// servedKeys are the identity keys of the served user, in each of its forms.
+func (c *chain) servedKeys(homeDomain string) []string {
+	return identityKeys(c.served.URI, homeDomain)
+}
+
 const (
 	hopPending int32 = iota
 	hopBack
@@ -254,7 +259,7 @@ func (s *Sessions) toAS(ctx context.Context, tx *transaction.ServerTransaction, 
 	}
 
 	if opts.Dialog != nil && c.binding != 0 {
-		s.r.calls.add(opts.Dialog, bindingKey(c.binding), proxy.Caller)
+		s.r.calls.add(opts.Dialog, bindingKey(c.binding), proxy.Caller, c.servedKeys(s.r.cfg.HomeDomain))
 	}
 
 	s.log.Debug("request sent to an AS", slog.String("request", out.StartLine()), slog.String("as", as.ServerName),
@@ -451,17 +456,17 @@ func (r *Registrar) profileOf(ctx context.Context, u sip.URI, regs []db.Registra
 		return p, sub, true, nil
 	}
 
-	e, err := r.unregisteredProfile(ctx, u)
+	set, sub, err := r.unregisteredProfile(ctx, u)
 	if err != nil {
 		return cx.ServiceProfile{}, cx.IMSSubscription{}, false, err
 	}
 
-	p, ok := serviceProfileOf(e.sub, u, e.wildcard, r.cfg.HomeDomain)
+	p, ok := serviceProfileOf(sub, u, set.Unregistered.Wildcard, r.cfg.HomeDomain)
 	if !ok {
 		r.log.Warn("no service profile of the HSS holds the identity: no service", slog.String("impu", u.String()))
 	}
 
-	return p, e.sub, false, nil
+	return p, sub, false, nil
 }
 
 // criteria are the iFCs of a service profile that can be evaluated: one with a regular expression that does not
