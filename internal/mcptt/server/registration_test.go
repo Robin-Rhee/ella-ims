@@ -166,9 +166,9 @@ func TestPublishRegistrationToken(t *testing.T) {
 	}
 }
 
-// TS 24.229 §5.7.1.1 a, c: the third-party REGISTER of a tel URI IMPU, of its SIP URI in its implicit registration set:
-// the reg event subscription is to the SIP URI, and a deregistration is told by it; the server unsubscribes once the
-// IMPU has no binding.
+// TS 24.229 §5.7.1.1 a, c; §4.2 NOTE 4: the third-party REGISTER of a tel URI IMPU, of another SIP URI in its implicit
+// registration set: the reg event subscription is to the SIP URI of its number, "user=phone", not to that other public
+// user identity, and a deregistration is told by it; the server unsubscribes once the IMPU has no binding.
 func TestRegEventTelURI(t *testing.T) {
 	h := newHarness(t, registrar.ThroughIMS)
 	s := h.scscf
@@ -187,7 +187,7 @@ func TestRegEventTelURI(t *testing.T) {
 
 	s.pump()
 
-	if s.subs[bobIM] == nil {
+	if s.subs[bobPhone] == nil {
 		t.Fatalf("subscriptions %v", s.subs)
 	}
 
@@ -195,17 +195,65 @@ func TestRegEventTelURI(t *testing.T) {
 		t.Fatalf("deregistration: %d", res.StatusCode)
 	}
 
-	s.notify(bobIM, 1, "partial", `<registration aor="`+bobTel+`" id="r1" state="active">`+terminated("c9", ue1.instance, "", 0)+`</registration>`)
+	s.notify(bobPhone, 1, "partial", `<registration aor="`+bobTel+`" id="r1" state="active">`+terminated("c9", ue1.instance, "", 0)+`</registration>`)
 
 	if bs := h.s.Registrar().Bindings(uri(t, bob)); len(bs) != 1 || bs[0].ClientID != client2 {
 		t.Fatalf("bindings %+v", bs)
 	}
 
-	s.notify(bobIM, 2, "partial", `<registration aor="`+bobTel+`" id="r1" state="terminated"/>`)
+	s.notify(bobPhone, 2, "partial", `<registration aor="`+bobTel+`" id="r1" state="terminated"/>`)
 	s.pump()
 
-	if len(h.s.Registrar().Bindings(uri(t, bob))) != 0 || !slices.Equal(s.unsubscribed, []string{bobIM}) {
+	if len(h.s.Registrar().Bindings(uri(t, bob))) != 0 || !slices.Equal(s.unsubscribed, []string{bobPhone}) {
 		t.Fatalf("unsubscribed %v", s.unsubscribed)
+	}
+}
+
+// bobPhone is the SIP URI of bob's number, "user=phone", at the home domain (TS 23.003 §13.4; RFC 3261 §19.1.6).
+const bobPhone = "sip:+15555550102@ims.example.com;user=phone"
+
+// TS 24.229 §5.7.1.1 a, c; TS 23.003 §13.4B: the third-party REGISTER of a tel URI IMPU whose implicit registration
+// set has no other identity, as of Ella Core's HSS (a barred temporary IMPU, not in the P-Associated-URI): the reg
+// event subscription is to the SIP URI of its number, "user=phone", at the home domain, which the S-CSCF resolves to
+// the tel URI. Its documents report the registration of the tel URI, or of the SIP URI subscribed to: a deregistration
+// is told by either, and the server unsubscribes once the IMPU has no binding.
+func TestRegEventTelURIAlone(t *testing.T) {
+	for _, aor := range []string{bobTel, bobPhone} {
+		t.Run(aor, func(t *testing.T) {
+			h := newHarness(t, registrar.ThroughIMS)
+			s := h.scscf
+			s.regEvent = true
+			s.pau = []string{bobTel}
+
+			ue := h.client(bobTel)
+			ue.instance = "urn:uuid:00000000-0000-1000-8000-000000000001"
+
+			if res := s.send(s.register(bobTel, "t1", 600, ue.register("sip:ims.example.com", 600, info(token(bob), client1)))); res.StatusCode != 200 {
+				t.Fatalf("REGISTER: %d", res.StatusCode)
+			}
+
+			s.pump()
+
+			sub := s.subs[bobPhone]
+			if sub == nil || s.subscribes != 1 {
+				t.Fatalf("subscriptions %v", s.subs)
+			}
+
+			if u := sub.subscribe.URI; u.String() != bobPhone || !u.IsSIP() {
+				t.Fatalf("SUBSCRIBE Request-URI %s", u)
+			}
+
+			if res := s.send(s.register(bobTel, "", 0, nil)); res.StatusCode != 200 || len(h.s.Registrar().Bindings(uri(t, bob))) != 1 {
+				t.Fatalf("deregistration: %d", res.StatusCode)
+			}
+
+			s.notify(bobPhone, 1, "partial", `<registration aor="`+aor+`" id="r1" state="terminated"/>`)
+			s.pump()
+
+			if len(h.s.Registrar().Bindings(uri(t, bob))) != 0 || !slices.Equal(s.unsubscribed, []string{bobPhone}) {
+				t.Fatalf("bindings %+v, unsubscribed %v", h.s.Registrar().Bindings(uri(t, bob)), s.unsubscribed)
+			}
+		})
 	}
 }
 

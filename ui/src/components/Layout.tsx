@@ -25,6 +25,7 @@ import {
   Menu as MenuIcon,
   PhoneAndroid as PhoneAndroidIcon,
   OpenInNew as OpenInNewIcon,
+  RecordVoiceOver as RecordVoiceOverIcon,
 } from "@mui/icons-material";
 import { Link, useLocation } from "react-router-dom";
 import DeploymentIdentity from "@/components/DeploymentIdentity";
@@ -74,6 +75,11 @@ const navItems = [
     icon: <PhoneAndroidIcon color="primary" />,
   },
   { to: "/calls", label: "Calls", icon: <CallIcon color="primary" /> },
+  {
+    to: "/ptt",
+    label: "Push-to-Talk",
+    icon: <RecordVoiceOverIcon color="primary" />,
+  },
 ];
 
 export default function Layout({ children }: { children: ReactNode }) {

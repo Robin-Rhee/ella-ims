@@ -38,9 +38,9 @@ func (d *DB) SaveMCPTTRegistrations(ctx context.Context, records []registrar.Rec
 			}
 
 			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO mcptt_registrations (client_id, mcptt_id, impu, impus,
-				expires_at, scscf, as_uri, token, instance, reg_id, contact, call_id, cseq, icid, orig_ioi,
-				charging_function_addresses) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, r.ClientID,
-				r.MCPTTID.String(), r.IMPU.String(), string(set), r.Expires.UnixMilli(), uriString(r.SCSCF),
+				expires_at, since, scscf, as_uri, token, instance, reg_id, contact, call_id, cseq, icid, orig_ioi,
+				charging_function_addresses) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, r.ClientID,
+				r.MCPTTID.String(), r.IMPU.String(), string(set), r.Expires.UnixMilli(), r.Since.UnixMilli(), uriString(r.SCSCF),
 				uriString(r.AS), r.Token, r.Instance, r.RegID, uriString(r.Contact), r.CallID, r.CSeq,
 				r.Charging.ICID, r.Charging.OrigIOI, r.Charging.FunctionAddresses); err != nil {
 				return err
@@ -65,7 +65,7 @@ func (d *DB) MCPTTRegistrations(ctx context.Context) (_ []registrar.Record, err 
 }
 
 func (d *DB) mcpttRegistrations(ctx context.Context) ([]registrar.Record, []string, error) {
-	rows, err := d.conn.QueryContext(ctx, `SELECT client_id, mcptt_id, impu, impus, expires_at, scscf, as_uri, token,
+	rows, err := d.conn.QueryContext(ctx, `SELECT client_id, mcptt_id, impu, impus, expires_at, since, scscf, as_uri, token,
 		instance, reg_id, contact, call_id, cseq, icid, orig_ioi, charging_function_addresses FROM mcptt_registrations
 		ORDER BY client_id`)
 	if err != nil {
@@ -83,15 +83,15 @@ func (d *DB) mcpttRegistrations(ctx context.Context) ([]registrar.Record, []stri
 		var (
 			r                                 registrar.Record
 			id, impu, set, scscf, as, contact string
-			expires                           int64
+			expires, since                    int64
 		)
 
-		if err := rows.Scan(&r.ClientID, &id, &impu, &set, &expires, &scscf, &as, &r.Token, &r.Instance, &r.RegID,
+		if err := rows.Scan(&r.ClientID, &id, &impu, &set, &expires, &since, &scscf, &as, &r.Token, &r.Instance, &r.RegID,
 			&contact, &r.CallID, &r.CSeq, &r.Charging.ICID, &r.Charging.OrigIOI, &r.Charging.FunctionAddresses); err != nil {
 			return nil, nil, fmt.Errorf("get MCPTT registrations: %w", err)
 		}
 
-		r.Expires = time.UnixMilli(expires)
+		r.Expires, r.Since = time.UnixMilli(expires), time.UnixMilli(since)
 
 		if !parseMCPTTRecord(&r, []string{id, impu, scscf, as, contact}, set) {
 			bad = append(bad, r.ClientID)
@@ -180,8 +180,8 @@ func (d *DB) SaveMCPTTAffiliations(ctx context.Context, records []affiliation.Re
 				}
 
 				if _, err := tx.ExecContext(ctx, `INSERT INTO mcptt_affiliations (user_key, client_id, position, group_uri,
-					status, expires_at, pid) VALUES (?, ?, ?, ?, ?, ?, ?)`, uk, r.ClientID, i, g.ID.String(),
-					string(g.Status), g.Expires.UnixMilli(), pid); err != nil {
+					status, expires_at, pid, configured) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, uk, r.ClientID, i, g.ID.String(),
+					string(g.Status), g.Expires.UnixMilli(), pid, g.Configured); err != nil {
 					return err
 				}
 			}
@@ -254,14 +254,15 @@ func (d *DB) mcpttAffiliations(ctx context.Context) ([]affiliation.Record, [][2]
 		return nil, nil, err
 	}
 
-	err = queryRows(ctx, tx, "get MCPTT affiliations", `SELECT user_key, client_id, group_uri, status, expires_at, pid
-		FROM mcptt_affiliations ORDER BY user_key, client_id, position`, func(rows *sql.Rows) error {
+	err = queryRows(ctx, tx, "get MCPTT affiliations", `SELECT user_key, client_id, group_uri, status, expires_at, pid,
+		configured FROM mcptt_affiliations ORDER BY user_key, client_id, position`, func(rows *sql.Rows) error {
 		var (
 			uk, client, group, status, pid string
 			expires                        int64
+			configured                     bool
 		)
 
-		if err := rows.Scan(&uk, &client, &group, &status, &expires, &pid); err != nil {
+		if err := rows.Scan(&uk, &client, &group, &status, &expires, &pid, &configured); err != nil {
 			return err
 		}
 
@@ -277,7 +278,9 @@ func (d *DB) mcpttAffiliations(ctx context.Context) ([]affiliation.Record, [][2]
 		}
 
 		r := &out[i]
-		r.Groups = append(r.Groups, affiliation.Group{ID: g, Status: affiliation.Status(status), Expires: time.UnixMilli(expires)})
+		r.Groups = append(r.Groups, affiliation.Group{
+			ID: g, Status: affiliation.Status(status), Expires: time.UnixMilli(expires), Configured: configured,
+		})
 		r.PIDs = append(r.PIDs, pid)
 
 		return nil

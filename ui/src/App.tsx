@@ -4,6 +4,7 @@ import Calls from "@/pages/Calls";
 import Cores from "@/pages/Cores";
 import Operator from "@/pages/Operator";
 import Registrations from "@/pages/Registrations";
+import PushToTalk from "@/pages/mcptt/PushToTalk";
 
 export default function App() {
   return (
@@ -13,6 +14,8 @@ export default function App() {
         <Route path="/operator" element={<Operator />} />
         <Route path="/registrations" element={<Registrations />} />
         <Route path="/calls" element={<Calls />} />
+        <Route path="/ptt" element={<Navigate to="/ptt/groups" replace />} />
+        <Route path="/ptt/:tab" element={<PushToTalk />} />
         <Route path="*" element={<Navigate to="/cores" replace />} />
       </Routes>
     </Layout>

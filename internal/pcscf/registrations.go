@@ -100,14 +100,18 @@ func newRegistrations(ctx context.Context, store RegistrationStore, clock Clock,
 	}
 }
 
-func (rs *registrations) restore(ctx context.Context) ([]db.PCSCFRegistration, error) {
+// restore loads the stored registrations after a restart. It deletes those expired, and those that usable refuses,
+// whose UE the P-CSCF can no longer reach: they are no bindings, and a request to them gets the 430 of a flow that
+// no longer exists (RFC 5626 §5.3.1; the 404 of TS 24.229 §5.2.6.4.1 is of P-CSCF restoration, not supported).
+func (rs *registrations) restore(ctx context.Context, usable func(*db.PCSCFRegistration) bool,
+) (expired, lost []db.PCSCFRegistration, err error) {
 	if rs.store == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	regs, err := rs.store.ListPCSCFRegistrations(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	rs.mu.Lock()
@@ -115,23 +119,23 @@ func (rs *registrations) restore(ctx context.Context) ([]db.PCSCFRegistration, e
 
 	now := rs.clock.Now()
 
-	var expired []db.PCSCFRegistration
-
 	for _, r := range regs {
-		if !r.ExpiresAt.After(now) {
-			if err := rs.store.DeletePCSCFRegistration(ctx, r.ID); err != nil {
-				return nil, err
-			}
-
+		switch {
+		case !r.ExpiresAt.After(now):
 			expired = append(expired, r)
-
+		case usable != nil && !usable(&r):
+			lost = append(lost, r)
+		default:
+			rs.add(&r)
 			continue
 		}
 
-		rs.add(&r)
+		if err := rs.store.DeletePCSCFRegistration(ctx, r.ID); err != nil {
+			return nil, nil, err
+		}
 	}
 
-	return expired, nil
+	return expired, lost, nil
 }
 
 func clone(r *db.PCSCFRegistration) db.PCSCFRegistration {

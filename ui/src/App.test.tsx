@@ -57,6 +57,7 @@ describe("App", () => {
       ["Operator", "/operator"],
       ["Registrations", "/registrations"],
       ["Calls", "/calls"],
+      ["Push-to-Talk", "/ptt"],
     ]);
     expect(screen.getByRole("main")).toBeInTheDocument();
     expect(screen.getByRole("contentinfo")).toBeInTheDocument();

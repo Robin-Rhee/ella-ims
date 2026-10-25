@@ -269,7 +269,10 @@ func (p *PCSCF) ueTarget(req, out *sip.Request, removed []sip.URI) (proxy.Target
 	}
 
 	// RFC 5626 §5.3.1: a flow that no longer exists gets a 430, so that the S-CSCF can try the UE's
-	// other flows (RFC 5626 §7). The S-CSCF answers 480 upstream when no other flow is left.
+	// other flows (RFC 5626 §7). The S-CSCF answers 480 upstream when no other flow is left. This holds as well
+	// for a binding lost in a restart, and for an in-dialog request whose flow is gone: the 404 (Not Found) of
+	// TS 24.229 §4.14.2 and §5.2.6.4.1 is for a network that supports PCRF or HSS based P-CSCF restoration,
+	// which this one does not (§5.4.3.3), and a 404 would tell the caller that the user does not exist.
 	f, ok := p.regs.flow(flowToken(removed))
 	if !ok {
 		return proxy.Target{}, sip.NewResponse(req, 430, "")

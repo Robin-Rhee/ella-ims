@@ -119,13 +119,20 @@ type entry struct {
 	pid     string
 	// implicit marks the entry an implicit affiliation by a request added (§9.2.2.2.12), until its outcome.
 	implicit bool
+	// configured marks the entry the implicit affiliation to configured groups added (§9.2.2.2.15), the server's,
+	// until a publication of the client lists the group (§9.2.2.2.3 step 14 a i), which makes it the client's:
+	// Reconfigure de-affiliates only the server's.
+	configured bool
 }
 
-// Group is the affiliation status of a client to a group.
+// Group is the affiliation status of a client to a group. Configured tells the server affiliated the client to it
+// by the implicit affiliation to configured groups (TS 24.379 §9.2.2.2.15), and the client's publications did not
+// list it since.
 type Group struct {
-	ID      sip.URI
-	Status  Status
-	Expires time.Time
+	ID         sip.URI
+	Status     Status
+	Expires    time.Time
+	Configured bool
 }
 
 // NewParticipating is the participating function's state, publishing to owner, logging to log (slog.Default() if
@@ -148,7 +155,8 @@ type Store interface {
 }
 
 // Record is what is kept of the affiliations of a client of a user: the groups it is affiliating or affiliated to, in
-// order, of the explicit affiliations and the configured implicit ones; and the entity-tag of its last publication.
+// order, of the explicit affiliations and the configured implicit ones (Group.Configured); and the entity-tag of its
+// last publication.
 // The de-affiliating entries, and the implicit affiliations of a request (§9.2.2.2.12), last no longer than a restart.
 type Record struct {
 	MCPTTID  sip.URI
@@ -193,7 +201,7 @@ func (p *Participating) Restore(now time.Time, records []Record, bound func(id s
 				continue
 			}
 
-			e := &entry{group: g.ID, key: k, status: g.Status, expires: g.Expires}
+			e := &entry{group: g.ID, key: k, status: g.Status, expires: g.Expires, configured: g.Configured}
 			if i < len(r.PIDs) {
 				e.pid = r.PIDs[i]
 			}
@@ -281,7 +289,7 @@ func (p *Participating) persist(now time.Time) {
 
 			for _, e := range c.groups {
 				if now.Before(e.expires) && !e.implicit && (e.status == Affiliating || e.status == Affiliated) {
-					r.Groups = append(r.Groups, Group{ID: e.group, Status: e.status, Expires: e.expires})
+					r.Groups = append(r.Groups, e.view())
 					r.PIDs = append(r.PIDs, e.pid)
 				}
 			}
@@ -326,7 +334,40 @@ func (p *Participating) Groups(now time.Time, id sip.URI, clientID string) []Gro
 	if u := p.users[settings.Key(id)]; u != nil && u.clients[clientID] != nil {
 		for _, e := range u.clients[clientID].groups {
 			if now.Before(e.expires) {
-				out = append(out, Group{ID: e.group, Status: e.status, Expires: e.expires})
+				out = append(out, e.view())
+			}
+		}
+	}
+
+	return out
+}
+
+// Affiliations are the entries of a client not expired, of its user, in order.
+type Affiliations struct {
+	User   sip.URI
+	Client string
+	Groups []Group
+}
+
+// Snapshot is the state: of each client with entries not expired, its entries, in no order of the clients.
+func (p *Participating) Snapshot(now time.Time) []Affiliations {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var out []Affiliations
+
+	for _, u := range p.users {
+		for _, c := range u.clients {
+			a := Affiliations{User: u.id, Client: c.id}
+
+			for _, e := range c.groups {
+				if now.Before(e.expires) {
+					a.Groups = append(a.Groups, e.view())
+				}
+			}
+
+			if len(a.Groups) > 0 {
+				out = append(out, a)
 			}
 		}
 	}
@@ -405,7 +446,8 @@ func (p *Participating) apply(now time.Time, pub Publication, etag string) []job
 					n.status, n.pid = Affiliating, pub.PID
 				}
 
-				n.expires = now.Add(pub.Expires)
+				// The client lists the group: the affiliation is its own, no longer the configuration's.
+				n.expires, n.configured = now.Add(pub.Expires), false
 			case e.status == Affiliated || e.status == Affiliating:
 				n.status, n.expires = Deaffiliating, now.Add(deaffiliating)
 			}
@@ -485,11 +527,12 @@ func (p *Participating) setETag(u *user, c *client, etag string) {
 // expiration interval, which the clause leaves open, is MaxExpires, as of an explicit affiliation: the affiliations
 // last until the client logs off (TS 23.280 §5.2.5).
 func (p *Participating) ImplicitConfigured(now time.Time, cfg *settings.User, clientID string) {
-	p.flush(now, p.implicitConfigured(now, cfg, clientID))
+	p.flush(now, p.implicitConfigured(now, cfg, clientID, nil))
 	p.persist(now)
 }
 
-func (p *Participating) implicitConfigured(now time.Time, cfg *settings.User, clientID string) []job {
+// implicitConfigured affiliates client to the groups of cfg's <ImplicitAffiliations> not of had, which may be nil.
+func (p *Participating) implicitConfigured(now time.Time, cfg *settings.User, clientID string, had map[string]bool) []job {
 	groups := cfg.ImplicitGroups()
 	if len(groups) == 0 {
 		return nil
@@ -513,9 +556,11 @@ func (p *Participating) implicitConfigured(now time.Time, cfg *settings.User, cl
 
 	for _, g := range groups {
 		k := settings.Key(g.ID())
-		if find(cand, k, now) == nil {
+		if !had[k] && find(cand, k, now) == nil {
 			cand = slices.DeleteFunc(cand, func(e *entry) bool { return e.key == k })
-			cand = append(cand, &entry{group: g.ID(), key: k, status: Affiliating, expires: now.Add(MaxExpires)})
+			cand = append(cand, &entry{
+				group: g.ID(), key: k, status: Affiliating, expires: now.Add(MaxExpires), configured: true,
+			})
 			added = true
 		}
 	}
@@ -539,6 +584,67 @@ func (p *Participating) implicitConfigured(now time.Time, cfg *settings.User, cl
 	}
 
 	u.prune(now)
+
+	return jobs
+}
+
+// Reconfigure applies the change of the <ImplicitAffiliations> of a user from before to cfg (TS 24.484 §8.3.2.1) to
+// client of the user, whose service authorisation stands, at once: the groups of before no longer of cfg that the
+// implicit affiliation to configured groups affiliated the client to de-affiliated, as by the client's publication not
+// listing them (§9.2.2.2.3 step 14 a ii), and published to the server owning each group (§9.2.2.2.6); then the groups
+// of cfg not of before affiliated, as at service authorisation (ImplicitConfigured). §9.2.2.2.15 runs at service
+// authorisation, and the specs leave a change of the profile to the clients authorised already open: by local policy,
+// it applies at once, to the groups the change adds or removes only. A group the client left by its publication
+// (§9.2.2.2.3 step 14 a ii) stays left through a change that does not touch it, and is affiliated again by one that
+// adds it back: the operator's latest act. The groups the client listed itself stay (§9.2.2.2.3), those of the
+// implicit affiliations of requests too (§9.2.2.2.12).
+func (p *Participating) Reconfigure(now time.Time, before, cfg *settings.User, clientID string) {
+	had := implicitKeys(before)
+
+	jobs := p.unconfigure(now, had, cfg, clientID)
+	p.flush(now, append(jobs, p.implicitConfigured(now, cfg, clientID, had)...))
+	p.persist(now)
+}
+
+// implicitKeys are the keys of the groups of the <ImplicitAffiliations> of u.
+func implicitKeys(u *settings.User) map[string]bool {
+	keys := map[string]bool{}
+	for _, g := range u.ImplicitGroups() {
+		keys[settings.Key(g.ID())] = true
+	}
+
+	return keys
+}
+
+// unconfigure de-affiliates the configured entries of client of the groups of had no longer of cfg's
+// <ImplicitAffiliations>.
+func (p *Participating) unconfigure(now time.Time, had map[string]bool, cfg *settings.User, clientID string) []job {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	u := p.users[settings.Key(cfg.ID())]
+	if u == nil || u.clients[clientID] == nil {
+		return nil
+	}
+
+	c := u.clients[clientID]
+	configured := implicitKeys(cfg)
+
+	var jobs []job
+
+	for _, e := range c.groups {
+		if !e.configured || configured[e.key] || !had[e.key] || !now.Before(e.expires) ||
+			e.status != Affiliating && e.status != Affiliated {
+			continue
+		}
+
+		e.status, e.expires = Deaffiliating, now.Add(deaffiliating)
+		jobs = append(jobs, p.job(now, u, e.group))
+	}
+
+	if len(jobs) > 0 {
+		p.touch(u, c.id)
+	}
 
 	return jobs
 }
@@ -827,6 +933,11 @@ func (u *user) prune(now time.Time) {
 }
 
 func (c *client) find(k string, now time.Time) *entry { return find(c.groups, k, now) }
+
+// view is the Group of e.
+func (e *entry) view() Group {
+	return Group{ID: e.group, Status: e.status, Expires: e.expires, Configured: e.configured}
+}
 
 // find is the entry of group key k of es not expired, nil if none.
 func find(es []*entry, k string, now time.Time) *entry {

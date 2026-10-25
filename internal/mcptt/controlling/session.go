@@ -58,7 +58,8 @@ type session struct {
 	// setup is the state of the setup, until the originator is answered; answered then.
 	setup    setup
 	answered bool
-	// started is when the originator was answered.
+	// created is when the session was created, started when the originator was answered.
+	created  time.Time
 	started  time.Time
 	tng3     *ua.Timer
 	released bool
@@ -297,6 +298,7 @@ func (s *session) start(entry *settings.Entry, offer *sdp.Session, ai, ci int) e
 
 	s.origin = m
 
+	s.created = c.now()
 	c.allocate(s, s.snap.ControllingPSI())
 	s.grp.sess = s
 	s.log = s.log.With(slog.String("session", s.id.String()))
@@ -1000,6 +1002,59 @@ func (s *session) left(m *member) {
 		// §6.3.8.1 2.
 		s.release("too few participants", ua.Reply{})
 	}
+}
+
+// revoke applies a change of the settings to the session, on the strand of its group. Of a group deleted, the
+// session is released (§10.1.1.4.4.2): TS 23.280 §10.2.8 NOTE 1 leaves the calls of a group deleted to the
+// implementation, whose affiliations are removed (step 3), and the session's members with them. A member no longer a
+// member of the group, removed from it or its user deleted (TS 23.280 §10.2.6.1), is removed from the session
+// (remove), as a client no longer affiliated is (§10.1.1.4.4.3: "e.g. due to de-affiliation"): it could not initiate
+// nor join the call now (§10.1.1.4.2 steps 14 b, 15 b).
+func (s *session) revoke() {
+	if s.released {
+		return
+	}
+
+	g := s.c.cfg.Source.Current().Group(s.g.ID())
+	if g == nil {
+		s.release("group deleted", ua.Reply{})
+		return
+	}
+
+	for _, m := range slices.Clone(s.members) {
+		if (m.state == invited || m.state == joined) && g.Entry(m.id) == nil {
+			s.remove(m, "no longer a member")
+
+			if s.released {
+				return
+			}
+		}
+	}
+}
+
+// remove removes member m from the session for cause, as logged (TS 24.379 §10.1.1.4.4.3, §6.3.3.1.5): its leg ended,
+// a BYE once answered, a CANCEL to each branch of a member still invited, and m leaves as by its own BYE (left): its
+// floor participant leaves the floor control server, its media is released, and the release policy applies
+// (§6.3.8.1). The originator not answered yet releases the session, as by its CANCEL.
+func (s *session) remove(m *member, cause string) {
+	s.logMember(slog.LevelInfo, "participant removed", m, slog.String("cause", cause))
+
+	if m == s.origin && !s.answered {
+		s.release("originator "+cause, ua.Reply{})
+		return
+	}
+
+	if m.leg != nil {
+		_ = m.leg.End(ua.Reply{})
+	}
+
+	for _, l := range m.branches {
+		if l != m.leg {
+			_ = l.End(ua.Reply{})
+		}
+	}
+
+	s.left(m)
 }
 
 // release releases the session (TS 24.379 §6.3.3.1.5, §10.1.1.4.4.2) for cause, as logged: its floor control and
