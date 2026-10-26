@@ -968,8 +968,8 @@ func finalResponse(t *testing.T, sock *siptest.Socket) *sip.Response {
 }
 
 // TS 24.229 §5.2.5.1 step 2: a registration whose security associations a restart lost is not restored, and a
-// request toward its UE gets the 430 of a failed flow (RFC 5626 §5.3.1), which the S-CSCF answers upstream with a
-// 480: not the 404 (Not Found) of P-CSCF restoration (TS 24.229 §5.2.6.4.1), which this network does not support.
+// request toward its UE gets the 404 (Not Found) of no binding, which starts the P-CSCF restoration (TS 24.229
+// §5.2.6.4.1).
 func TestRestoreDropsTheRegistrationsOfLostSets(t *testing.T) {
 	s, u := newIPsecRegScene(t)
 	token, o := s.registerOverIPsec(u)
@@ -994,8 +994,20 @@ func TestRestoreDropsTheRegistrationsOfLostSets(t *testing.T) {
 	}
 
 	s.scscf.Send(sip.UDP, s.pcscf, s.coreRequest(u, "INVITE", "sip:"+token+"@"+s.pcscf.String()+";lr", nil))
-	wantStatus(t, finalResponse(t, s.scscf), 430)
+	wantPCSCFNotFound(t, finalResponse(t, s.scscf))
 	u.us.RecvNone(quiet)
+}
+
+// wantPCSCFNotFound checks that the response is the P-CSCF's 404 (Not Found) for no binding, with the P-CSCF as its
+// Response-Source (TS 24.229 §5.2.6.4.1, §7.2.17.5).
+func wantPCSCFNotFound(t *testing.T, res *sip.Response) {
+	t.Helper()
+
+	wantStatus(t, res, 404)
+
+	if src, ok, err := res.Header.ResponseSource(); !ok || err != nil || src.Entity != "p-cscf.term" {
+		t.Fatalf("Response-Source = %+v, %v, %v; want the P-CSCF, terminating", src, ok, err)
+	}
 }
 
 // A registration whose security associations survived the restart is restored and reached through them.
@@ -1021,21 +1033,22 @@ func TestRestoreKeepsTheRegistrationsOfKeptSets(t *testing.T) {
 	}
 }
 
-// RFC 5626 §5.3.1: a flow token the P-CSCF does not know gets the 430 of a failed flow, whatever the Request-URI:
-// a registered contact, or the remote target of a dialog, such as a GRUU, that no registered contact matches.
-func TestUnknownFlowGets430(t *testing.T) {
+// A request toward a flow token the P-CSCF does not know gets the 404 (Not Found) of no binding (TS 24.229
+// §5.2.6.4.1), whatever the Request-URI: a registered contact, one that no registered contact matches, or, within a
+// dialog, a remote target such as a GRUU.
+func TestUnknownFlow(t *testing.T) {
 	s, u := newIPsecRegScene(t)
 	s.registerOverIPsec(u)
 
 	path := "sip:nosuchflow@" + s.pcscf.String() + ";lr"
 
 	s.scscf.Send(sip.UDP, s.pcscf, s.coreRequest(u, "INVITE", path, nil))
-	wantStatus(t, finalResponse(t, s.scscf), 430)
+	wantPCSCFNotFound(t, finalResponse(t, s.scscf))
 
 	s.scscf.Send(sip.UDP, s.pcscf, s.coreRequest(u, "INVITE", path, func(r *sip.Request) {
 		r.URI = sip.URI{Scheme: "sip", User: "other", Host: "127.0.0.9", Port: 5060}
 	}))
-	wantStatus(t, finalResponse(t, s.scscf), 430)
+	wantPCSCFNotFound(t, finalResponse(t, s.scscf))
 
 	s.scscf.Send(sip.UDP, s.pcscf, s.coreRequest(u, "BYE", path, func(r *sip.Request) {
 		r.URI = sip.URI{Scheme: "sip", User: "ue", Host: homeDomain}
@@ -1043,7 +1056,7 @@ func TestUnknownFlowGets430(t *testing.T) {
 		r.Header.Set("To", "<"+testIMPU+">;tag=callee")
 		r.Header.Del("Record-Route")
 	}))
-	wantStatus(t, finalResponse(t, s.scscf), 430)
+	wantPCSCFNotFound(t, finalResponse(t, s.scscf))
 	u.us.RecvNone(quiet)
 }
 

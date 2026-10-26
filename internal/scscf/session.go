@@ -720,7 +720,7 @@ func (s *Sessions) branch(ctx context.Context, out *sip.Request, called sip.URI,
 		token = bindingToken(t.binding.ID)
 	}
 
-	opts.OnReply = s.aliasReply(t.reg, token, out.Method)
+	opts.OnReply = s.pcscfFailure(t, s.aliasReply(t.reg, token, out.Method))
 
 	return proxy.Branch{Request: r, Target: to, Options: opts, Key: bindingKey(t.binding.ID)}, true
 }
@@ -751,6 +751,38 @@ func (s *Sessions) aliasReply(reg db.Registration, token, method string) func(pr
 
 		return proxy.Relay
 	}
+}
+
+// pcscfFailure takes the 404 (Not Found) of a P-CSCF that has no binding for the UE (TS 24.229 §5.2.6.4.1) as the
+// failure of the flow: the UE's other flows are tried, and the response upstream is a 480 (Temporarily Unavailable)
+// when none is left (RFC 5626 §7, §11.5). The registrar removes the binding, and starts the HSS based P-CSCF
+// restoration when the UE has no other (TS 24.229 §5.4.3.3, TS 23.380 §5.4.1).
+func (s *Sessions) pcscfFailure(t target, next func(proxy.Reply) proxy.Verdict) func(proxy.Reply) proxy.Verdict {
+	return func(r proxy.Reply) proxy.Verdict {
+		if res := r.Response; res != nil && res.StatusCode == 404 && pcscfNotFound(t.binding.Contact.Path, res) {
+			s.log.Info("the P-CSCF has no binding for the contact", slog.String("impi", t.reg.IMPI),
+				slog.String("contact", t.binding.Contact.URI))
+
+			res.StatusCode, res.Reason = 430, sip.ReasonPhrase(430)
+
+			s.r.pcscfLost(t.reg.IMPI, t.reg.ID, t.binding.ID)
+		}
+
+		return next(r)
+	}
+}
+
+// pcscfNotFound reports whether a 404 (Not Found) toward a binding with the Path is the P-CSCF's, for no binding: the
+// P-CSCF gives itself as its Response-Source, which tells it from a 404 of the UE (TS 24.229 §5.2.6.4.1, §7.2.17.5).
+// A binding without a Path has no P-CSCF.
+func pcscfNotFound(path string, res *sip.Response) bool {
+	if path == "" {
+		return false
+	}
+
+	src, ok, err := res.Header.ResponseSource()
+
+	return ok && err == nil && src.FunctionalEntity() == sip.EntityPCSCF
 }
 
 // dialogCreating reports a method whose initial request creates a dialog (RFC 3261 §12, RFC 6665 §4.1, RFC 3515 §2.4.4).

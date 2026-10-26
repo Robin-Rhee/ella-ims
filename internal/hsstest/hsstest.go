@@ -210,6 +210,9 @@ type store struct {
 	// override has the HSS download the user profile in every SAA of a registration, the S-CSCF holding it or not
 	// (TS 29.228 §6.6).
 	override bool
+
+	// restoration has the HSS support the HSS based P-CSCF restoration (TS 23.380 §5.4).
+	restoration bool
 }
 
 // OverrideUserData has the HSS download the user profile in every SAA of a registration, or not.
@@ -218,6 +221,15 @@ func (h *HSS) OverrideUserData(on bool) {
 	defer h.db.mu.Unlock()
 
 	h.db.override = on
+}
+
+// SupportRestoration has the HSS advertise the P-CSCF-Restoration-mechanism feature (TS 29.229 Table 7.1.1), and
+// take the P-CSCF restoration indication, or not.
+func (h *HSS) SupportRestoration(on bool) {
+	h.db.mu.Lock()
+	defer h.db.mu.Unlock()
+
+	h.db.restoration = on
 }
 
 func New(t testing.TB, cfg Config) *HSS {
@@ -556,6 +568,15 @@ func (h *HSS) serverAssignment(_ context.Context, c *diameter.Conn, req *diamete
 	other := s.ServerName != "" && s.ServerName != sar.ServerName && !s.ReassignPending
 	userData := false
 
+	var features cx.Features
+	if h.db.restoration {
+		features = cx.FeaturePCSCFRestoration
+	}
+
+	// TS 29.228 §6.1.2.1: an HSS without the feature ignores the indication.
+	restoring := sar.PCSCFRestoration && features != 0 &&
+		(sar.Type == cx.AssignmentUnregisteredUser || sar.Type == cx.AssignmentAdministrativeDeregistration)
+
 	switch sar.Type {
 	case cx.AssignmentRegistration, cx.AssignmentReRegistration, cx.AssignmentUnregisteredUser:
 		if other {
@@ -569,7 +590,8 @@ func (h *HSS) serverAssignment(_ context.Context, c *diameter.Conn, req *diamete
 		s.State, userData = Registered, !sar.UserDataAlreadyAvailable || h.db.override
 
 		if sar.Type == cx.AssignmentUnregisteredUser {
-			s.State, userData = Unregistered, true
+			// TS 29.228 §6.1.2.1: the restoration downloads no user data.
+			s.State, userData = Unregistered, !restoring
 		} else {
 			s.AuthPending = false
 		}
@@ -596,7 +618,7 @@ func (h *HSS) serverAssignment(_ context.Context, c *diameter.Conn, req *diamete
 		return experimental(req, id, tgpp.ResultErrorInAssignmentType)
 	}
 
-	a := cx.ServerAssignment{PrivateIdentity: s.IMPI}
+	a := cx.ServerAssignment{PrivateIdentity: s.IMPI, Features: features}
 
 	// TS 29.228 Table 6.1.2.2: the wildcarded identity an identity falls in, unless the S-CSCF named it.
 	if (sar.Type == cx.AssignmentUnregisteredUser || sar.Type == cx.AssignmentNoAssignment) && sar.WildcardedPublicIdentity == "" &&
