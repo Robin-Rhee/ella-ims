@@ -23,6 +23,7 @@ tags:
   - name: SIP
   - name: Registrations
   - name: Call records
+  - name: IP-SM-GW
   - name: MCPTT service configuration
   - name: MCPTT users
   - name: MCPTT groups
@@ -218,7 +219,7 @@ paths:
         required: true
         schema:
           type: string
-          enum: [cx, rx]
+          enum: [cx, rx, sh, s6c]
     get:
       tags: [Diameter]
       operationId: getDiameterRoute
@@ -525,6 +526,43 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CallRecordRetentionResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/ip-sm-gw:
+    get:
+      tags: [IP-SM-GW]
+      operationId: getIPSMGW
+      summary: Get the built-in IP-SM-GW
+      responses:
+        "200":
+          description: The IP-SM-GW
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IPSMGWResult"
+    put:
+      tags: [IP-SM-GW]
+      operationId: updateIPSMGW
+      summary: Set the IP-SM-GW number
+      description: >-
+        The IP-SM-GW registers the new number at the HSS at once for the users it serves; an empty number
+        deregisters it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IPSMGWParams"
+      responses:
+        "200":
+          description: The IP-SM-GW, as stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IPSMGWResult"
         "400":
           $ref: "#/components/responses/BadRequest"
         "500":
@@ -1157,10 +1195,12 @@ components:
           type: array
           minItems: 1
           uniqueItems: true
-          description: cx for an HSS or an SLF, rx for a PCRF or a DRA.
+          description: >-
+            cx for an HSS or an SLF, and sh and s6c for its IP-SM-GW functions; rx for a PCRF or a DRA; sgd for an
+            SMSC, and for an MME or SMSF that the IP-SM-GW delivers short messages to.
           items:
             type: string
-            enum: [cx, rx]
+            enum: [cx, rx, sh, s6c, sgd]
         priority:
           type: integer
           minimum: 0
@@ -1170,6 +1210,17 @@ components:
             Requests try the peers serving their application by priority, lowest first, and share them between
             peers of the same priority. HSSs of the same priority must share their state, as the nodes of a
             replicated HSS do.
+        service_centres:
+          type: array
+          uniqueItems: true
+          description: >-
+            The service centre addresses of an SMSC, which needs sgd in applications: the IP-SM-GW sends a short
+            message from a phone to an SMSC of the service centre address the phone gives, by priority, at its host,
+            which is then required.
+          items:
+            type: string
+            pattern: "^[0-9]{1,15}$"
+            examples: ["15550000000"]
 
     DiameterPeer:
       allOf:
@@ -1217,7 +1268,9 @@ components:
       properties:
         realm:
           type: string
-          description: The realm of the HSS for cx, of the PCRF for rx. Absent or empty is the home domain.
+          description: >-
+            The realm of the HSS for cx, sh and s6c, of the PCRF for rx. Absent or empty is the realm of cx for sh
+            and s6c, and the home domain otherwise.
           examples: [epc.mnc001.mcc001.3gppnetwork.org]
 
     DiameterRoute:
@@ -1228,10 +1281,10 @@ components:
           properties:
             application:
               type: string
-              enum: [cx, rx]
+              enum: [cx, rx, sh, s6c]
             destination_realm:
               type: string
-              description: The Destination-Realm of the requests, the home domain if realm is empty.
+              description: The Destination-Realm of the requests, the default of realm if it is empty.
             peers:
               type: array
               description: The peers serving the application, in the order requests try them.
@@ -1519,6 +1572,36 @@ components:
       properties:
         result:
           $ref: "#/components/schemas/CallRecordRetention"
+
+    IPSMGWParams:
+      type: object
+      additionalProperties: false
+      required: [number]
+      properties:
+        number:
+          type: string
+          pattern: "^[0-9]{0,15}$"
+          description: >-
+            The E.164 number of the IP-SM-GW, digits only, which it registers at the HSS for the users able to
+            receive short messages over IP. Empty registers none.
+          examples: ["15550000100"]
+
+    IPSMGW:
+      allOf:
+        - $ref: "#/components/schemas/IPSMGWParams"
+        - type: object
+          required: [name]
+          properties:
+            name:
+              type: string
+              description: The SIP URI of the IP-SM-GW, which the iFCs of the HSS name it by.
+              examples: ["sip:ipsmgw.ims.mnc001.mcc001.3gppnetwork.org"]
+
+    IPSMGWResult:
+      type: object
+      properties:
+        result:
+          $ref: "#/components/schemas/IPSMGW"
 
     Error:
       type: object

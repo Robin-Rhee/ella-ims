@@ -17,12 +17,14 @@ const serve = ({
   peers = [peer()],
   routes = [routeOf(), routeOf({ application: "rx" })],
   current = policy(),
+  number = "15550000100",
   answer,
 }: {
   listeners?: typeof sip.listeners;
   peers?: DiameterPeer[];
   routes?: DiameterRoute[];
   current?: PolicyWithStatus;
+  number?: string;
   answer?: (req: Request) => Response | undefined;
 } = {}) => {
   const requests: Request[] = [];
@@ -67,6 +69,15 @@ const serve = ({
               json(200, { result: { ...r, ...(req.body as object) } }),
             ),
           ]),
+        ),
+        "/api/v1/ip-sm-gw": route((req) =>
+          json(200, {
+            result: {
+              number,
+              ...(req.body as object),
+              name: "sip:ipsmgw.ims.mnc001.mcc001.3gppnetwork.org",
+            },
+          }),
         ),
         "/api/v1/policy": route((req) =>
           req.method === "PUT"
@@ -216,6 +227,55 @@ describe("Cores", () => {
     ]);
   });
 
+  it("adds an SMSC with its service centres", async () => {
+    const requests = serve({ peers: [] });
+
+    renderWithClient(<Cores />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add Peer" }));
+
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).queryByRole("textbox", { name: "Service Centres" }),
+    ).not.toBeInTheDocument();
+
+    fill(/^Address/, "192.0.2.12");
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "HSS" }));
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "PCRF" }));
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "SGd" }));
+
+    fill(/^Service Centres/, "15550000000, +1555");
+    expect(
+      within(dialog).getByText("Distinct E.164 numbers of up to 15 digits"),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Add" })).toBeDisabled();
+
+    fill(/^Service Centres/, "15550000000, 15550000001");
+    expect(
+      within(dialog).getByText("An SMSC needs a host"),
+    ).toBeInTheDocument();
+    fill(/^Host/, "smsc.example.org");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        path: "/api/v1/diameter/peers",
+        body: {
+          host: "smsc.example.org",
+          address: "192.0.2.12",
+          port: 3868,
+          transport: "tcp",
+          applications: ["sgd"],
+          priority: 10,
+          service_centres: ["15550000000", "15550000001"],
+        },
+      },
+    ]);
+  });
+
   it("adds a peer without a host", async () => {
     const requests = serve({ peers: [] });
 
@@ -337,7 +397,7 @@ describe("Cores", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows where Cx and Rx requests go", async () => {
+  it("shows where Cx, Sh, S6c and Rx requests go", async () => {
     serve({
       routes: [
         routeOf(),
@@ -345,6 +405,12 @@ describe("Cores", () => {
           application: "rx",
           realm: "epc.mnc001.mcc001.3gppnetwork.org",
           destination_realm: "epc.mnc001.mcc001.3gppnetwork.org",
+        }),
+        routeOf({ application: "sh" }),
+        routeOf({
+          application: "s6c",
+          realm: "hss.example.org",
+          destination_realm: "hss.example.org",
         }),
       ],
     });
@@ -354,6 +420,8 @@ describe("Cores", () => {
     await waitFor(() =>
       expect(settingRows("HSS")).toEqual([
         ["HSS Realm", "ims.mnc001.mcc001.3gppnetwork.orghome domain"],
+        ["Sh Realm", "ims.mnc001.mcc001.3gppnetwork.orgHSS realm"],
+        ["S6c Realm", "hss.example.org"],
       ]),
     );
     expect(settingRows("Voice QoS")).toEqual([
@@ -561,6 +629,42 @@ describe("Cores", () => {
         method: "PUT",
         path: "/api/v1/policy",
         body: { interface: "n5", n5: { pcf_uri: "https://pcf.example.org" } },
+      },
+    ]);
+  });
+
+  it("shows and sets the IP-SM-GW number", async () => {
+    const requests = serve({ number: "" });
+
+    renderWithClient(<Cores />);
+
+    await waitFor(() =>
+      expect(settingRows("SMS over IP")).toEqual([
+        ["IP-SM-GW Name", "sip:ipsmgw.ims.mnc001.mcc001.3gppnetwork.org"],
+        ["IP-SM-GW Number", "—"],
+      ]),
+    );
+    expect(
+      screen.getByText("No IP-SM-GW number: phones get no SMS over IP."),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit IP-SM-GW Number" }),
+    );
+    fill(/^Number/, "+1555");
+    expect(screen.getByRole("button", { name: "Update" })).toBeDisabled();
+
+    fill(/^Number/, "15550000100");
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(requests).toEqual([
+      {
+        method: "PUT",
+        path: "/api/v1/ip-sm-gw",
+        body: { number: "15550000100" },
       },
     ]);
   });

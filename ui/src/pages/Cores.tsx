@@ -22,6 +22,7 @@ import CopyButton from "@/components/CopyButton";
 import DiameterPeerDialog from "@/components/DiameterPeerDialog";
 import DomainName from "@/components/DomainName";
 import EditPolicyDialog from "@/components/EditPolicyDialog";
+import EditIPSMGWDialog from "@/components/EditIPSMGWDialog";
 import EditRouteDialog from "@/components/EditRouteDialog";
 import PageHeader from "@/components/PageHeader";
 import PeerStateChip from "@/components/PeerStateChip";
@@ -36,6 +37,7 @@ import {
   listDiameterRoutes,
   peerName,
 } from "@/queries/diameter";
+import { getIPSMGW } from "@/queries/ipsmgw";
 import { getPolicy, type PolicyWithStatus } from "@/queries/policy";
 import { getSIPStatus } from "@/queries/sip";
 import { formatEndpoint, hostOf, portOf } from "@/utils/addresses";
@@ -90,7 +92,13 @@ const pcscfAddresses = (listeners: { role: string; address: string }[]) => {
 const routeHelp: Record<DiameterRoute["application"], string> = {
   cx: "The realm of your HSS, where Cx requests go.",
   rx: "The realm of your PCRF, where Rx requests go.",
+  sh: "The realm of your HSS, where the IP-SM-GW's Sh requests go.",
+  s6c: "The realm of your HSS, where the IP-SM-GW's S6c requests go.",
 };
+
+// The realm of an empty route: the HSS's for its other applications, else the home domain.
+const defaultRealmLabel = (application: DiameterRoute["application"]) =>
+  application === "sh" || application === "s6c" ? "HSS realm" : "home domain";
 
 // routeState is the state of the best connection on a route: open if any of its peers is.
 const routeState = (route: DiameterRoute | undefined) =>
@@ -180,6 +188,7 @@ export default function Cores() {
   const [deleting, setDeleting] = useState<DiameterPeer | null>(null);
   const [editingRoute, setEditingRoute] = useState<DiameterRoute | null>(null);
   const [editingPolicy, setEditingPolicy] = useState(false);
+  const [editingIPSMGW, setEditingIPSMGW] = useState(false);
 
   const sip = useQuery({ queryKey: ["sip"], queryFn: getSIPStatus });
   const identity = useQuery({
@@ -201,6 +210,7 @@ export default function Cores() {
     queryFn: getPolicy,
     refetchInterval: REFRESH_MS,
   });
+  const ipsmgw = useQuery({ queryKey: ["ip-sm-gw"], queryFn: getIPSMGW });
 
   const deletion = useMutation({
     mutationFn: (peer: DiameterPeer) => deleteDiameterPeer(peer.id),
@@ -298,7 +308,11 @@ export default function Cores() {
         <Stack direction="row" sx={{ alignItems: "center", gap: 1 }}>
           <DomainName name={r.destination_realm} />
           {r.realm === "" && (
-            <Chip label="home domain" size="small" variant="outlined" />
+            <Chip
+              label={defaultRealmLabel(application)}
+              size="small"
+              variant="outlined"
+            />
           )}
         </Stack>
       ),
@@ -418,7 +432,7 @@ export default function Cores() {
       <SettingsTable
         label="HSS"
         loading={routes.isPending}
-        rows={[realmRow("cx")]}
+        rows={[realmRow("cx"), realmRow("sh"), realmRow("s6c")]}
       />
 
       <SectionHeader
@@ -445,9 +459,44 @@ export default function Cores() {
       />
 
       <SectionHeader
+        id="sms-title"
+        title="SMS over IP"
+        description="The built-in IP-SM-GW, which carries SMS between phones on IMS and your SMSC."
+      />
+      <QueryAlert
+        error={ipsmgw.error}
+        hasData={ipsmgw.data !== undefined}
+        subject="IP-SM-GW"
+      />
+      {ipsmgw.data?.number === "" && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          No IP-SM-GW number: phones get no SMS over IP.
+        </Alert>
+      )}
+      <SettingsTable
+        label="SMS over IP"
+        loading={ipsmgw.isPending}
+        rows={[
+          {
+            label: "IP-SM-GW Name",
+            help: "The application server of your iFCs for SMS over IP.",
+            value: ipsmgw.data && (
+              <Copyable value={ipsmgw.data.name} label="IP-SM-GW Name" />
+            ),
+          },
+          {
+            label: "IP-SM-GW Number",
+            help: "Registered at the HSS for phones that can take SMS over IP.",
+            value: ipsmgw.data && (ipsmgw.data.number || "—"),
+            onEdit: ipsmgw.data && (() => setEditingIPSMGW(true)),
+          },
+        ]}
+      />
+
+      <SectionHeader
         id="peers-title"
         title={peers.data ? `Peers (${peers.data.length})` : "Peers"}
-        description="The Diameter connections to your HSS and PCRF."
+        description="The Diameter connections to your HSS, PCRF and SMSC."
       >
         <Button
           variant="contained"
@@ -513,6 +562,12 @@ export default function Cores() {
           route={editingRoute}
           homeDomain={identity.data?.realm ?? ""}
           onClose={() => setEditingRoute(null)}
+        />
+      )}
+      {editingIPSMGW && ipsmgw.data && (
+        <EditIPSMGWDialog
+          ipsmgw={ipsmgw.data}
+          onClose={() => setEditingIPSMGW(false)}
         />
       )}
       {editingPolicy && policy.data && (

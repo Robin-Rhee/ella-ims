@@ -44,13 +44,17 @@ func (d *DB) GetSettings(ctx context.Context) (_ settings.Settings, err error) {
 		return settings.Settings{}, fmt.Errorf("get call record settings: %w", err)
 	}
 
+	if err := d.conn.QueryRowContext(ctx, `SELECT number FROM ip_sm_gw WHERE id = 1`).Scan(&s.IPSMGW.Number); err != nil {
+		return settings.Settings{}, fmt.Errorf("get IP-SM-GW settings: %w", err)
+	}
+
 	return s, nil
 }
 
 // peers are in the order they were created in, which their UUIDv7 IDs sort in.
 func (d *DB) peers(ctx context.Context) ([]settings.Peer, error) {
-	rows, err := d.conn.QueryContext(ctx, `SELECT id, host, address, port, transport, applications, priority
-		FROM diameter_peers ORDER BY id`)
+	rows, err := d.conn.QueryContext(ctx, `SELECT id, host, address, port, transport, applications, priority,
+		service_centres FROM diameter_peers ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("get Diameter peers: %w", err)
 	}
@@ -64,9 +68,11 @@ func (d *DB) peers(ctx context.Context) ([]settings.Peer, error) {
 			p                  settings.Peer
 			address, transport string
 			applications       string
+			serviceCentres     string
 		)
 
-		if err := rows.Scan(&p.ID, &p.Host, &address, &p.Port, &transport, &applications, &p.Priority); err != nil {
+		if err := rows.Scan(&p.ID, &p.Host, &address, &p.Port, &transport, &applications, &p.Priority,
+			&serviceCentres); err != nil {
 			return nil, fmt.Errorf("get Diameter peers: %w", err)
 		}
 
@@ -80,6 +86,10 @@ func (d *DB) peers(ctx context.Context) ([]settings.Peer, error) {
 			p.Applications = append(p.Applications, settings.Application(a))
 		}
 
+		if serviceCentres != "" {
+			p.ServiceCentres = strings.Split(serviceCentres, ",")
+		}
+
 		peers = append(peers, p)
 	}
 
@@ -90,7 +100,7 @@ func (d *DB) peers(ctx context.Context) ([]settings.Peer, error) {
 	return peers, nil
 }
 
-// routes are in the order of settings.Applications.
+// routes are in the order of settings.RoutedApplications.
 func (d *DB) routes(ctx context.Context) ([]settings.Route, error) {
 	rows, err := d.conn.QueryContext(ctx, `SELECT application, realm FROM diameter_routes`)
 	if err != nil {
@@ -115,9 +125,9 @@ func (d *DB) routes(ctx context.Context) ([]settings.Route, error) {
 		return nil, fmt.Errorf("get Diameter routes: %w", err)
 	}
 
-	routes := make([]settings.Route, 0, len(settings.Applications))
+	routes := make([]settings.Route, 0, len(settings.RoutedApplications))
 
-	for _, app := range settings.Applications {
+	for _, app := range settings.RoutedApplications {
 		realm, ok := realms[app]
 		if !ok {
 			return nil, fmt.Errorf("get Diameter routes: no route for %s", app)
@@ -145,7 +155,7 @@ func (d *DB) CreatePeer(ctx context.Context, p settings.Peer) (err error) {
 	defer d.observe(poolWrite, &err)()
 
 	if _, err := d.conn.ExecContext(ctx, `INSERT INTO diameter_peers (id, host, address, port, transport,
-		applications, priority) VALUES (?, ?, ?, ?, ?, ?, ?)`, peerRow(p)...); err != nil {
+		applications, priority, service_centres) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, peerRow(p)...); err != nil {
 		return fmt.Errorf("create Diameter peer: %w", err)
 	}
 
@@ -158,7 +168,7 @@ func (d *DB) UpdatePeer(ctx context.Context, p settings.Peer) (err error) {
 	row := peerRow(p)
 
 	res, err := d.conn.ExecContext(ctx, `UPDATE diameter_peers SET host = ?, address = ?, port = ?, transport = ?,
-		applications = ?, priority = ? WHERE id = ?`, append(row[1:], row[0])...)
+		applications = ?, priority = ?, service_centres = ? WHERE id = ?`, append(row[1:], row[0])...)
 	if err != nil {
 		return fmt.Errorf("update Diameter peer: %w", err)
 	}
@@ -229,5 +239,18 @@ func peerRow(p settings.Peer) []any {
 		apps[i] = string(a)
 	}
 
-	return []any{p.ID, p.Host, p.Address.String(), p.Port, string(p.Transport), strings.Join(apps, ","), p.Priority}
+	return []any{
+		p.ID, p.Host, p.Address.String(), p.Port, string(p.Transport), strings.Join(apps, ","), p.Priority,
+		strings.Join(p.ServiceCentres, ","),
+	}
+}
+
+func (d *DB) UpdateIPSMGW(ctx context.Context, g settings.IPSMGW) (err error) {
+	defer d.observe(poolWrite, &err)()
+
+	if _, err := d.conn.ExecContext(ctx, `UPDATE ip_sm_gw SET number = ? WHERE id = 1`, g.Number); err != nil {
+		return fmt.Errorf("update IP-SM-GW settings: %w", err)
+	}
+
+	return nil
 }

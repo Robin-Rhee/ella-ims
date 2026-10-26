@@ -10,12 +10,25 @@ import (
 type Application string
 
 const (
-	ApplicationCx Application = "cx"
-	ApplicationRx Application = "rx"
+	ApplicationCx  Application = "cx"
+	ApplicationRx  Application = "rx"
+	ApplicationSh  Application = "sh"
+	ApplicationS6c Application = "s6c"
+	ApplicationSGd Application = "sgd"
 )
 
-// Applications are the Diameter applications of the IMS, in the order the API lists their routes.
-var Applications = []Application{ApplicationCx, ApplicationRx}
+// Applications are the Diameter applications of the IMS.
+var Applications = []Application{ApplicationCx, ApplicationRx, ApplicationSh, ApplicationS6c, ApplicationSGd}
+
+// RoutedApplications are the applications whose requests go to a realm, through the peers serving them, in the
+// order the API lists their routes. SGd requests go to a host instead (Peer).
+var RoutedApplications = []Application{ApplicationCx, ApplicationRx, ApplicationSh, ApplicationS6c}
+
+// hssApplications are those of the HSS besides cx, whose requests go to the realm of cx unless set.
+var hssApplications = []Application{ApplicationSh, ApplicationS6c}
+
+// Routed reports whether the requests of the application go to a realm (RoutedApplications).
+func (a Application) Routed() bool { return slices.Contains(RoutedApplications, a) }
 
 type Transport string
 
@@ -28,11 +41,16 @@ const (
 	DefaultDiameterPort = 3868
 	DefaultPriority     = 10
 	maxPriority         = 65535
+	// maxE164Digits is the length of an international number (ITU-T E.164 §6).
+	maxE164Digits = 15
 )
 
-// Peer is a Diameter peer of the IMS: an HSS or an SLF serves cx, a PCRF or a DRA serves rx. Requests go to the
-// peers serving their application by priority, lowest first, and are shared between peers of the same priority
-// (RFC 6733 §2.7, §5.1). The peer's realm is the one it gives in the capabilities exchange.
+// Peer is a Diameter peer of the IMS: an HSS or an SLF serves cx, and sh and s6c for the IP-SM-GW; a PCRF or a DRA
+// serves rx; an SMSC, and an MME or SMSF that the IP-SM-GW delivers short messages to, serve sgd. The requests of a
+// routed application go to the peers serving it by priority, lowest first, and are shared between peers of the same
+// priority (RFC 6733 §2.7, §5.1). SGd requests go to a host: the SMSC of the service centre address of a short
+// message, or the MME or SMSF that the HSS names (TS 29.338 §6.3.1). The peer's realm is the one it gives in the
+// capabilities exchange.
 type Peer struct {
 	ID string
 	// Host is the Origin-Host the peer must give in the capabilities exchange. Empty takes the one it gives
@@ -43,13 +61,18 @@ type Peer struct {
 	Transport    Transport
 	Applications []Application
 	Priority     int
+	// ServiceCentres are the E.164 service centre addresses of an SMSC serving sgd, whose mobile originated short
+	// messages the IP-SM-GW sends it, to its host (TS 29.338 §6.3.1.1). The SMSCs of a service centre are tried by
+	// priority.
+	ServiceCentres []string
 }
 
-// Route is where the requests of an application go: the realm of the HSS for cx, of the PCRF for rx (RFC 6733
-// §6.1.6). Its peers are those serving the application.
+// Route is where the requests of a routed application go: the realm of the HSS for cx, sh and s6c, of the PCRF for
+// rx (RFC 6733 §6.1.6). Its peers are those serving the application.
 type Route struct {
 	Application Application
-	// Realm is the Destination-Realm of the requests. Empty is the home domain.
+	// Realm is the Destination-Realm of the requests. Empty is the realm of cx for sh and s6c, and the home domain
+	// otherwise.
 	Realm string
 }
 
@@ -72,13 +95,26 @@ func (p Peer) Validate() error {
 	case p.Priority < 0 || p.Priority > maxPriority:
 		return invalidf("priority must be between 0 and %d", maxPriority)
 	case len(p.Applications) == 0:
-		return invalidf("applications must list cx, rx or both")
+		return invalidf("applications must list at least one of cx, rx, sh, s6c and sgd")
+	case len(p.ServiceCentres) > 0 && !p.Serves(ApplicationSGd):
+		return invalidf("service_centres need sgd in applications")
+	case len(p.ServiceCentres) > 0 && p.Host == "":
+		return invalidf("service_centres need a host, the Destination-Host of the short messages")
+	}
+
+	for i, sc := range p.ServiceCentres {
+		switch {
+		case !isDigits(sc) || len(sc) > maxE164Digits:
+			return invalidf("service_centres must be E.164 numbers of up to %d digits, not %q", maxE164Digits, sc)
+		case slices.Contains(p.ServiceCentres[:i], sc):
+			return invalidf("service_centres lists %s twice", sc)
+		}
 	}
 
 	for i, a := range p.Applications {
 		switch {
 		case !slices.Contains(Applications, a):
-			return invalidf("applications must list cx, rx or both, not %q", a)
+			return invalidf("applications must list cx, rx, sh, s6c or sgd, not %q", a)
 		case slices.Contains(p.Applications[:i], a):
 			return invalidf("applications lists %s twice", a)
 		}
@@ -89,8 +125,8 @@ func (p Peer) Validate() error {
 
 func (r Route) Validate() error {
 	switch {
-	case !slices.Contains(Applications, r.Application):
-		return invalidf("application must be cx or rx, not %q", r.Application)
+	case !r.Application.Routed():
+		return invalidf("application must be cx, rx, sh or s6c, not %q", r.Application)
 	case r.Realm != "" && !isFQDN(r.Realm):
 		return invalidf("realm must be a domain name")
 	}
@@ -100,7 +136,8 @@ func (r Route) Validate() error {
 
 func (p Peer) equal(q Peer) bool {
 	return p.ID == q.ID && strings.EqualFold(p.Host, q.Host) && p.Address == q.Address && p.Port == q.Port &&
-		p.Transport == q.Transport && slices.Equal(p.Applications, q.Applications) && p.Priority == q.Priority
+		p.Transport == q.Transport && slices.Equal(p.Applications, q.Applications) && p.Priority == q.Priority &&
+		slices.Equal(p.ServiceCentres, q.ServiceCentres)
 }
 
 // isFQDN reports whether s is a DiameterIdentity or a realm: a domain name (RFC 6733 §4.3.1).
@@ -132,6 +169,10 @@ func (s Settings) Realm(app Application) string {
 		}
 	}
 
+	if slices.Contains(hssApplications, app) {
+		return s.Realm(ApplicationCx)
+	}
+
 	return s.Operator.HomeDomain()
 }
 
@@ -147,6 +188,20 @@ func (s Settings) Serving(app Application) []Peer {
 	}
 
 	slices.SortStableFunc(out, func(a, b Peer) int { return cmp.Compare(a.Priority, b.Priority) })
+
+	return out
+}
+
+// SMSCs are the peers of a service centre address, in the order to try them: by priority, then in the order they
+// were created in.
+func (s Settings) SMSCs(serviceCentre string) []Peer {
+	var out []Peer
+
+	for _, p := range s.Serving(ApplicationSGd) {
+		if slices.Contains(p.ServiceCentres, serviceCentre) {
+			out = append(out, p)
+		}
+	}
 
 	return out
 }

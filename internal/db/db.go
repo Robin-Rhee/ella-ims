@@ -193,14 +193,15 @@ var migrations = []string{
 		port INTEGER NOT NULL,
 		transport TEXT NOT NULL,
 		applications TEXT NOT NULL,
-		priority INTEGER NOT NULL CHECK (priority BETWEEN 0 AND 65535)
+		priority INTEGER NOT NULL CHECK (priority BETWEEN 0 AND 65535),
+		service_centres TEXT NOT NULL
 	);
 	CREATE UNIQUE INDEX diameter_peers_host ON diameter_peers (host) WHERE host != '';
 	CREATE TABLE diameter_routes (
-		application TEXT PRIMARY KEY CHECK (application IN ('cx', 'rx')),
+		application TEXT PRIMARY KEY CHECK (application IN ('cx', 'rx', 'sh', 's6c')),
 		realm TEXT NOT NULL
 	);
-	INSERT INTO diameter_routes VALUES ('cx', ''), ('rx', '');
+	INSERT INTO diameter_routes VALUES ('cx', ''), ('rx', ''), ('sh', ''), ('s6c', '');
 	CREATE TABLE policy (
 		id INTEGER PRIMARY KEY CHECK (id = 1),
 		interface TEXT NOT NULL,
@@ -304,6 +305,30 @@ var migrations = []string{
 		PRIMARY KEY (user_key, client_id, position),
 		FOREIGN KEY (user_key, client_id) REFERENCES mcptt_affiliation_clients (user_key, client_id)
 			ON DELETE CASCADE ON UPDATE CASCADE
+	);
+	-- The IP-SM-GW (ipsmgw.go). Its number, empty until set; the registrations of the third-party REGISTERs, each of
+	-- an IMPU; and the users the HSS has the IP-SM-GW registered for, of the number it was given.
+	CREATE TABLE ip_sm_gw (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		number TEXT NOT NULL
+	);
+	INSERT INTO ip_sm_gw VALUES (1, '');
+	CREATE TABLE ip_sm_gw_registrations (
+		impu_key TEXT PRIMARY KEY,
+		impu TEXT NOT NULL,
+		impus TEXT NOT NULL,
+		msisdn TEXT NOT NULL,
+		imsi TEXT NOT NULL,
+		scscf TEXT NOT NULL,
+		as_uri TEXT NOT NULL,
+		expires_at INTEGER NOT NULL,
+		available INTEGER NOT NULL CHECK (available IN (0, 1))
+	);
+	CREATE TABLE ip_sm_gw_hss_registrations (
+		user_key TEXT PRIMARY KEY,
+		msisdn TEXT NOT NULL,
+		impu TEXT NOT NULL,
+		number TEXT NOT NULL CHECK (number != '')
 	);`,
 }
 

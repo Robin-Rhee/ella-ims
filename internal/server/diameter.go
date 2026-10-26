@@ -14,6 +14,9 @@ import (
 	"github.com/ellanetworks/core/diameter"
 	"github.com/ellanetworks/core/diameter/cx"
 	"github.com/ellanetworks/core/diameter/rx"
+	"github.com/ellanetworks/core/diameter/s6c"
+	"github.com/ellanetworks/core/diameter/sgd"
+	"github.com/ellanetworks/core/diameter/sh"
 	"github.com/ellanetworks/core/diameter/tgpp"
 	"github.com/ellanetworks/core/sctp"
 	"github.com/ellanetworks/ims/internal/config"
@@ -28,8 +31,11 @@ const productName = "ims"
 const DefaultHandshakeTimeout = 15 * time.Second
 
 var applications = map[settings.Application]diameter.Application{
-	settings.ApplicationCx: {ID: cx.ApplicationID, VendorID: tgpp.VendorID},
-	settings.ApplicationRx: {ID: rx.ApplicationID, VendorID: tgpp.VendorID},
+	settings.ApplicationCx:  {ID: cx.ApplicationID, VendorID: tgpp.VendorID},
+	settings.ApplicationRx:  {ID: rx.ApplicationID, VendorID: tgpp.VendorID},
+	settings.ApplicationSh:  {ID: sh.ApplicationID, VendorID: tgpp.VendorID},
+	settings.ApplicationS6c: {ID: s6c.ApplicationID, VendorID: tgpp.VendorID},
+	settings.ApplicationSGd: {ID: sgd.ApplicationID, VendorID: tgpp.VendorID},
 }
 
 var transports = map[settings.Transport]diameter.Transport{
@@ -37,8 +43,8 @@ var transports = map[settings.Transport]diameter.Transport{
 	settings.TransportSCTP: diameter.TransportSCTP,
 }
 
-// realms are the realms the running Diameter node routes Cx and Rx to, which the S-CSCF, I-CSCF and P-CSCF
-// address their requests to. They change with the node's routes.
+// realms are the realms the running Diameter node routes the routed applications to, which the S-CSCF, I-CSCF,
+// P-CSCF and IP-SM-GW address their requests to. They change with the node's routes.
 type realms struct {
 	st atomic.Pointer[settings.Settings]
 }
@@ -59,7 +65,7 @@ func (r *realms) of(app settings.Application) func() string {
 }
 
 func newDiameterNode(cfg config.Diameter, s settings.Settings, handshake time.Duration, cxh *cxHandler,
-	rxh *rxHandler, logger *slog.Logger,
+	rxh *rxHandler, ish ipsmgwHandler, logger *slog.Logger,
 ) (*diameter.Node, error) {
 	op := s.Operator
 
@@ -74,7 +80,7 @@ func newDiameterNode(cfg config.Diameter, s settings.Settings, handshake time.Du
 			HostIPAddresses: []netip.Addr{cfg.Address},
 			ProductName:     productName,
 		},
-		Handler:           newDiameterMux(cxh, rxh),
+		Handler:           newDiameterMux(cxh, rxh, ish),
 		HandshakeTimeout:  handshake,
 		OnPeerStateChange: func(p diameter.PeerStatus) { logPeerState(logger, p) },
 		Logger:            logger,
@@ -149,8 +155,9 @@ func closeListeners(lns []diameter.Listener) {
 	}
 }
 
-// diameterPeers are the peers of the Diameter node, each on the route of the applications it serves, to the realm
-// of the application, and to its realm in the previous settings, if any.
+// diameterPeers are the peers of the Diameter node, each on the route of the routed applications it serves, to the
+// realm of the application, and to its realm in the previous settings, if any. SGd has no route: its requests go to
+// a host (settings.Peer).
 func diameterPeers(st settings.Settings, previous ...settings.Settings) []diameter.Peer {
 	out := make([]diameter.Peer, 0, len(st.Peers))
 
@@ -160,6 +167,11 @@ func diameterPeers(st settings.Settings, previous ...settings.Settings) []diamet
 
 		for _, a := range p.Applications {
 			apps = append(apps, applications[a])
+
+			if !a.Routed() {
+				continue
+			}
+
 			routes = append(routes, diameter.Route{Realm: st.Realm(a), Application: applications[a].ID, Priority: p.Priority})
 
 			for _, prev := range previous {
@@ -183,8 +195,13 @@ func diameterPeers(st settings.Settings, previous ...settings.Settings) []diamet
 	return out
 }
 
-func newDiameterMux(cxh *cxHandler, rxh *rxHandler) *diameter.Mux {
+func newDiameterMux(cxh *cxHandler, rxh *rxHandler, ish ipsmgwHandler) *diameter.Mux {
 	mux := diameter.NewMux()
+
+	if ish.as != nil {
+		mux.Handle(s6c.ApplicationID, s6c.CommandSendRoutingInfoForSM, diameter.HandlerFunc(ish.routingInfo))
+		mux.Handle(sgd.ApplicationID, sgd.CommandMTForwardShortMessage, diameter.HandlerFunc(ish.forwardShortMessage))
+	}
 
 	mux.Handle(cx.ApplicationID, cx.CommandRegistrationTermination, diameter.HandlerFunc(cxh.registrationTermination))
 	mux.Handle(cx.ApplicationID, cx.CommandPushProfile, diameter.HandlerFunc(cxh.pushProfile))

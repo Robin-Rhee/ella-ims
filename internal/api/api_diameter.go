@@ -28,14 +28,16 @@ func GetDiameterStatus(cfg Config) http.Handler {
 }
 
 // DiameterPeerParams are what an operator sets of a peer. Host is optional: empty takes the one the peer gives in
-// its capabilities exchange. Port defaults to 3868, transport to tcp, and priority to 10.
+// its capabilities exchange. Port defaults to 3868, transport to tcp, and priority to 10. ServiceCentres are those
+// of an SMSC serving sgd.
 type DiameterPeerParams struct {
-	Host         string   `json:"host"`
-	Address      string   `json:"address"`
-	Port         int      `json:"port,omitempty"`
-	Transport    string   `json:"transport,omitempty"`
-	Applications []string `json:"applications"`
-	Priority     *int     `json:"priority,omitempty"`
+	Host           string   `json:"host"`
+	Address        string   `json:"address"`
+	Port           int      `json:"port,omitempty"`
+	Transport      string   `json:"transport,omitempty"`
+	Applications   []string `json:"applications"`
+	Priority       *int     `json:"priority,omitempty"`
+	ServiceCentres []string `json:"service_centres,omitempty"`
 }
 
 type DiameterPeer struct {
@@ -174,6 +176,8 @@ func peerSettings(params DiameterPeerParams) (settings.Peer, error) {
 		p.Applications = append(p.Applications, settings.Application(a))
 	}
 
+	p.ServiceCentres = params.ServiceCentres
+
 	return p, nil
 }
 
@@ -205,12 +209,13 @@ func peerResponse(p settings.Peer, statuses map[string]diameter.PeerStatus) Diam
 	resp := DiameterPeer{
 		ID: p.ID,
 		DiameterPeerParams: DiameterPeerParams{
-			Host:         p.Host,
-			Address:      p.Address.String(),
-			Port:         p.Port,
-			Transport:    string(p.Transport),
-			Applications: []string{},
-			Priority:     &p.Priority,
+			Host:           p.Host,
+			Address:        p.Address.String(),
+			Port:           p.Port,
+			Transport:      string(p.Transport),
+			Applications:   []string{},
+			Priority:       &p.Priority,
+			ServiceCentres: p.ServiceCentres,
 		},
 		Status: peerStatus(p, statuses),
 	}
@@ -245,8 +250,8 @@ func peerStatus(p settings.Peer, statuses map[string]diameter.PeerStatus) Diamet
 	return status
 }
 
-// DiameterRouteParams are what an operator sets of a route: the realm of the HSS or the PCRF. Empty is the home
-// domain.
+// DiameterRouteParams are what an operator sets of a route: the realm of the HSS or the PCRF. Empty is the realm of
+// cx for sh and s6c, and the home domain otherwise.
 type DiameterRouteParams struct {
 	Realm string `json:"realm"`
 }
