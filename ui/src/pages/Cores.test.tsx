@@ -4,7 +4,7 @@ import Cores from "@/pages/Cores";
 import type { DiameterPeer, DiameterRoute } from "@/queries/diameter";
 import type { PolicyWithStatus } from "@/queries/policy";
 import { identity, peer, policy, route as routeOf, sip } from "@/test/fixtures";
-import { json, renderWithClient, stubApi } from "@/test/render";
+import { json, readOnlyAuth, renderWithClient, stubApi } from "@/test/render";
 
 interface Request {
   method: string;
@@ -113,6 +113,20 @@ afterEach(() => {
 });
 
 describe("Cores", () => {
+  it("offers no change to a Read Only user", async () => {
+    serve();
+    renderWithClient(<Cores />, readOnlyAuth);
+
+    await peerRow(peer().host);
+    await screen.findByText("15550000100");
+    expect(
+      screen.queryByRole("button", { name: "Create Peer" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^(Edit|Delete) / }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows what to set in the core", async () => {
     serve();
 
@@ -187,10 +201,12 @@ describe("Cores", () => {
 
     renderWithClient(<Cores />);
     expect(await screen.findByText("No peers.")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Add Peer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Peer" }));
 
     const dialog = screen.getByRole("dialog");
-    expect(within(dialog).getByRole("button", { name: "Add" })).toBeDisabled();
+    expect(
+      within(dialog).getByRole("button", { name: "Create" }),
+    ).toBeDisabled();
     expect(within(dialog).getByRole("textbox", { name: "Port" })).toHaveValue(
       "3868",
     );
@@ -206,7 +222,7 @@ describe("Cores", () => {
     expect(within(dialog).getByRole("alert")).toHaveTextContent(
       "Diameter and SIP restart",
     );
-    fireEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create" }));
 
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
@@ -231,7 +247,7 @@ describe("Cores", () => {
     const requests = serve({ peers: [] });
 
     renderWithClient(<Cores />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add Peer" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Peer" }));
 
     const dialog = screen.getByRole("dialog");
     expect(
@@ -247,14 +263,16 @@ describe("Cores", () => {
     expect(
       within(dialog).getByText("Distinct E.164 numbers of up to 15 digits"),
     ).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "Add" })).toBeDisabled();
+    expect(
+      within(dialog).getByRole("button", { name: "Create" }),
+    ).toBeDisabled();
 
     fill(/^Service Centres/, "15550000000, 15550000001");
     expect(
       within(dialog).getByText("An SMSC needs a host"),
     ).toBeInTheDocument();
     fill(/^Host/, "smsc.example.org");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create" }));
 
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
@@ -280,9 +298,9 @@ describe("Cores", () => {
     const requests = serve({ peers: [] });
 
     renderWithClient(<Cores />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add Peer" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Peer" }));
     fill(/^Address/, "192.0.2.9");
-    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => expect(requests).toHaveLength(1));
     expect(requests[0].body).toMatchObject({ host: "", address: "192.0.2.9" });
@@ -319,7 +337,7 @@ describe("Cores", () => {
     serve({ peers: [] });
 
     renderWithClient(<Cores />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add Peer" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Peer" }));
     fill(/^Host/, "hss.example.org");
     fill(/^Address/, "192.0.2.9");
 
@@ -328,12 +346,12 @@ describe("Cores", () => {
     fill(/^Port/, "3868");
     fill(/^Priority/, "65536");
     expect(screen.getByText("0 to 65535")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Create" })).toBeDisabled();
     fill(/^Priority/, "10");
     fireEvent.click(screen.getByRole("checkbox", { name: "HSS" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "PCRF" }));
     expect(screen.getByText("At least one")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Create" })).toBeDisabled();
   });
 
   it("moves or renames a peer without warning, keeping its roles", async () => {
@@ -465,11 +483,9 @@ describe("Cores", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: `Delete ${peer().host}` }),
     );
-    const dialog = screen.getByRole("dialog", {
-      name: `Delete ${peer().host}?`,
-    });
-    expect(within(dialog).getByRole("alert")).toHaveTextContent(
-      "Diameter and SIP restart",
+    const dialog = screen.getByRole("dialog", { name: "Delete Peer" });
+    expect(dialog).toHaveTextContent(
+      `Delete ${peer().host}? Diameter and SIP restart`,
     );
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
 
@@ -497,10 +513,10 @@ describe("Cores", () => {
 
     expect(
       await screen.findByText(
-        "Could not delete: rx requires a Diameter peer serving rx",
+        "Failed to delete peer: rx requires a Diameter peer serving rx",
       ),
     ).toBeInTheDocument();
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("warns that calls get no voice bearer without a policy function", async () => {

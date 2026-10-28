@@ -3,7 +3,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import Registrations from "@/pages/Registrations";
 import type { Registration } from "@/queries/registrations";
 import { contact, registration } from "@/test/fixtures";
-import { json, renderWithClient, stubApi } from "@/test/render";
+import { json, readOnlyAuth, renderWithClient, stubApi } from "@/test/render";
 import { identitiesOf } from "@/utils/registrations";
 
 const alice = registration({
@@ -103,6 +103,19 @@ afterEach(() => {
 });
 
 describe("Registrations", () => {
+  it("offers no re-authentication to a Read Only user", async () => {
+    serve([alice]);
+    renderWithClient(<Registrations />, readOnlyAuth);
+
+    await screen.findByText(imsiOf(alice));
+    expect(
+      screen.queryByRole("button", { name: /^Re-authenticate/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "Actions" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("lists the registrations", async () => {
     serve([alice, bob]);
 
@@ -360,8 +373,9 @@ describe("Registrations", () => {
     );
 
     const dialog = screen.getByRole("dialog", {
-      name: "Re-authenticate +15551230001?",
+      name: "Re-authenticate Subscriber",
     });
+    expect(dialog).toHaveTextContent("Re-authenticate +15551230001?");
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Re-authenticate" }),
     );
@@ -385,9 +399,11 @@ describe("Registrations", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Re-authenticate" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      `Could not re-authenticate: no registration for ${alice.impi}`,
-    );
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        `Failed to re-authenticate: no registration for ${alice.impi}`,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

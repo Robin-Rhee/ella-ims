@@ -7,15 +7,13 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import {
-  Add as AddIcon,
-  Delete as DeleteIcon,
-  Edit as EditIcon,
-} from "@mui/icons-material";
+import { Delete as DeleteIcon, Edit as EditIcon } from "@mui/icons-material";
 import { DataGrid, type GridColDef } from "@mui/x-data-grid";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import QueryAlert from "@/components/QueryAlert";
+import { useAuth } from "@/contexts/AuthContext";
+import { errorMessage, useSnackbar } from "@/contexts/SnackbarContext";
 import UserDialog from "@/components/mcptt/UserDialog";
 import UserDrawer from "@/components/mcptt/UserDrawer";
 import { useMCPTTLive, useMCPTTSettings } from "@/hooks/useMCPTT";
@@ -27,13 +25,15 @@ import {
   shortID,
   userLabel,
 } from "@/utils/mcptt";
+import { GRID_SX } from "@/utils/layout";
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
 export const gridSx = {
-  bgcolor: "background.paper",
+  ...GRID_SX,
   "& .MuiDataGrid-row": { cursor: "pointer" },
   "& .MuiDataGrid-cell": {
+    ...GRID_SX["& .MuiDataGrid-cell"],
     display: "flex",
     alignItems: "center",
     py: 1,
@@ -65,6 +65,8 @@ const matches = (u: MCPTTUser, search: string) => {
 
 export function UsersTab() {
   const queryClient = useQueryClient();
+  const { showSnackbar } = useSnackbar();
+  const editable = useAuth().can("mcptt:update");
   const { users, groups, domain, homeDomain } = useMCPTTSettings();
   const { registrations, affiliations } = useMCPTTLive();
   const [search, setSearch] = useState("");
@@ -78,6 +80,11 @@ export function UsersTab() {
       void queryClient.invalidateQueries({ queryKey: mcpttKeys.users });
       void queryClient.invalidateQueries({ queryKey: mcpttKeys.groups });
       setDeleting(null);
+      showSnackbar("User deleted successfully.", "success");
+    },
+    onError: (error) => {
+      setDeleting(null);
+      showSnackbar(`Failed to delete user: ${errorMessage(error)}`, "error");
     },
   });
 
@@ -90,7 +97,7 @@ export function UsersTab() {
     ? (users.data?.find((u) => u.mcptt_id === selected) ?? null)
     : null;
 
-  const columns: GridColDef<MCPTTUser>[] = [
+  const allColumns: GridColDef<MCPTTUser>[] = [
     {
       field: "name",
       headerName: "Name",
@@ -190,6 +197,9 @@ export function UsersTab() {
       ),
     },
   ];
+  const columns = editable
+    ? allColumns
+    : allColumns.filter((c) => c.field !== "actions");
 
   const leaving = deleting ? groupsOf(allGroups, deleting.mcptt_id) : [];
 
@@ -212,21 +222,19 @@ export function UsersTab() {
           placeholder="Name, MCPTT ID or IMS identity"
           sx={{ minWidth: 280 }}
         />
-        <Button
-          variant="contained"
-          color="success"
-          startIcon={<AddIcon />}
-          onClick={() => setDialog({})}
-          disabled={users.data === undefined || groups.data === undefined}
-        >
-          Add User
-        </Button>
+        {editable && (
+          <Button
+            variant="contained"
+            color="success"
+            onClick={() => setDialog({})}
+            disabled={users.data === undefined || groups.data === undefined}
+          >
+            Create User
+          </Button>
+        )}
       </Stack>
-      <QueryAlert
-        error={users.error ?? groups.error}
-        hasData={users.data !== undefined}
-        subject="users"
-      />
+      <QueryAlert query={users} subject="users" />
+      <QueryAlert query={groups} subject="groups" />
       <DataGrid<MCPTTUser>
         aria-label="Users"
         rows={rows}
@@ -259,20 +267,17 @@ export function UsersTab() {
       )}
       {deleting && (
         <ConfirmDialog
-          title={`Delete ${userLabel(deleting, domain)}?`}
-          action="Delete"
+          title="Delete User"
+          description={`Delete ${userLabel(deleting, domain)}? ${
+            leaving.length > 0
+              ? `The user also leaves ${leaving.map((g) => groupLabel(g, domain)).join(", ")}. `
+              : ""
+          }Its phones leave their calls and can no longer use push-to-talk.`}
+          confirmLabel="Delete"
           pending={deletion.isPending}
-          error={deletion.error}
           onConfirm={() => deletion.mutate(deleting)}
           onClose={() => setDeleting(null)}
-        >
-          <Typography>
-            {leaving.length > 0
-              ? `The user also leaves ${leaving.map((g) => groupLabel(g, domain)).join(", ")}. `
-              : ""}
-            Its phones leave their calls and can no longer use push-to-talk.
-          </Typography>
-        </ConfirmDialog>
+        />
       )}
       <UserDrawer
         user={shown}

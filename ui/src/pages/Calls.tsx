@@ -23,6 +23,7 @@ import EditRetentionDialog from "@/components/EditRetentionDialog";
 import MediaIcons from "@/components/MediaIcons";
 import PageHeader from "@/components/PageHeader";
 import QueryAlert from "@/components/QueryAlert";
+import { useAuth } from "@/contexts/AuthContext";
 import TimeRangePicker, {
   RELATIVE_RANGES,
   timeRangeFilter,
@@ -48,6 +49,7 @@ import {
   outcomeLabels,
 } from "@/utils/callRecords";
 import { formatRecentTimestamp, formatTimestamp } from "@/utils/dates";
+import { GRID_SX } from "@/utils/layout";
 
 export const CALLS_REFRESH_MS = 5000;
 
@@ -119,9 +121,10 @@ const columns: GridColDef<CallRecord>[] = [
 ];
 
 const gridSx = {
-  bgcolor: "background.paper",
+  ...GRID_SX,
   "& .MuiDataGrid-row": { cursor: "pointer" },
   "& .MuiDataGrid-cell": {
+    ...GRID_SX["& .MuiDataGrid-cell"],
     display: "flex",
     alignItems: "center",
     py: 1,
@@ -130,6 +133,7 @@ const gridSx = {
 };
 
 export default function Calls() {
+  const editable = useAuth().can("call_record:update_retention");
   const [search, setSearch] = useSearchParamState("search");
   const [outcomeParam, setOutcomeParam] = useSearchParamState("outcome");
   const [timeRange, setTimeRange] = useTimeRangeSearchParams({
@@ -148,7 +152,7 @@ export default function Calls() {
     PAGE_SIZE_OPTIONS[0],
   );
 
-  const { data, error, isFetching } = useQuery({
+  const calls = useQuery({
     queryKey: ["call-records", filter, pagination],
     queryFn: () =>
       listCallRecords({
@@ -166,6 +170,7 @@ export default function Calls() {
         ? CALLS_REFRESH_MS
         : false,
   });
+  const { data, isFetching } = calls;
 
   const retention = useQuery({
     queryKey: ["call-record-retention"],
@@ -247,7 +252,7 @@ export default function Calls() {
           <Typography variant="body2" color="textSecondary">
             Retention: <strong>{retention.data?.days ?? "…"}</strong> days
           </Typography>
-          {retention.data && (
+          {retention.data && editable && (
             <IconButton
               aria-label="edit call record retention"
               size="small"
@@ -259,12 +264,8 @@ export default function Calls() {
           )}
         </Box>
       </Stack>
-      <QueryAlert error={error} hasData={data !== undefined} subject="calls" />
-      <QueryAlert
-        error={retention.error}
-        hasData={retention.data !== undefined}
-        subject="the call record retention"
-      />
+      <QueryAlert query={calls} subject="calls" />
+      <QueryAlert query={retention} subject="call record retention" />
       <DataGrid<CallRecord>
         aria-labelledby="calls-title"
         rows={data?.items ?? []}

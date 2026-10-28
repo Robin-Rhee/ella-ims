@@ -10,11 +10,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import {
-  Add as AddIcon,
-  Delete as DeleteIcon,
-  Edit as EditIcon,
-} from "@mui/icons-material";
+import { Delete as DeleteIcon, Edit as EditIcon } from "@mui/icons-material";
 import { DataGrid, type GridColDef } from "@mui/x-data-grid";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import ConfirmDialog from "@/components/ConfirmDialog";
@@ -27,6 +23,8 @@ import EditRouteDialog from "@/components/EditRouteDialog";
 import PageHeader from "@/components/PageHeader";
 import PeerStateChip from "@/components/PeerStateChip";
 import QueryAlert from "@/components/QueryAlert";
+import { useAuth } from "@/contexts/AuthContext";
+import { errorMessage, useSnackbar } from "@/contexts/SnackbarContext";
 import SettingsTable, { type SettingRow } from "@/components/SettingsTable";
 import {
   deleteDiameterPeer,
@@ -44,25 +42,18 @@ import { formatEndpoint, hostOf, portOf } from "@/utils/addresses";
 import { formatTimestamp } from "@/utils/dates";
 import { applicationLabels, policyLabels } from "@/utils/labels";
 import { changesTransports, RESTART_WARNING } from "@/utils/restart";
+import { GRID_SX } from "@/utils/layout";
 
 export const REFRESH_MS = 5000;
 
 const gridSx = {
-  width: "100%",
-  border: 1,
-  borderColor: "divider",
-  bgcolor: "background.paper",
+  ...GRID_SX,
   "& .MuiDataGrid-cell": {
-    borderBottom: "1px solid",
-    borderColor: "divider",
+    ...GRID_SX["& .MuiDataGrid-cell"],
     display: "flex",
     alignItems: "center",
     py: 1,
     overflowWrap: "anywhere",
-  },
-  "& .MuiDataGrid-columnHeaders": {
-    borderBottom: "1px solid",
-    borderColor: "divider",
   },
 };
 
@@ -182,6 +173,9 @@ function SectionHeader({
 
 export default function Cores() {
   const queryClient = useQueryClient();
+  const { showSnackbar } = useSnackbar();
+  const auth = useAuth();
+  const canDiameter = auth.can("diameter:update");
   const [peerDialog, setPeerDialog] = useState<{ peer?: DiameterPeer } | null>(
     null,
   );
@@ -219,10 +213,15 @@ export default function Cores() {
       void queryClient.invalidateQueries({ queryKey: ["diameter-routes"] });
       void queryClient.invalidateQueries({ queryKey: ["policy"] });
       setDeleting(null);
+      showSnackbar("Peer deleted successfully.", "success");
+    },
+    onError: (error) => {
+      setDeleting(null);
+      showSnackbar(`Failed to delete peer: ${errorMessage(error)}`, "error");
     },
   });
 
-  const columns: GridColDef<DiameterPeer>[] = [
+  const allColumns: GridColDef<DiameterPeer>[] = [
     {
       field: "host",
       headerName: "Host",
@@ -296,6 +295,10 @@ export default function Cores() {
     },
   ];
 
+  const columns = canDiameter
+    ? allColumns
+    : allColumns.filter((c) => c.field !== "actions");
+
   const route = (application: DiameterRoute["application"]) =>
     routes.data?.find((r) => r.application === application);
 
@@ -316,7 +319,7 @@ export default function Cores() {
           )}
         </Stack>
       ),
-      onEdit: r && (() => setEditingRoute(r)),
+      onEdit: r && canDiameter ? () => setEditingRoute(r) : undefined,
     };
   };
 
@@ -378,7 +381,9 @@ export default function Cores() {
       label: "Policy Function",
       help: "Where the IMS requests voice QoS for calls.",
       value: policy.data && policyLabels[policy.data.interface],
-      onEdit: () => setEditingPolicy(true),
+      onEdit: auth.can("policy:update")
+        ? () => setEditingPolicy(true)
+        : undefined,
     },
   ];
   if (policy.data?.interface === "rx") {
@@ -406,11 +411,8 @@ export default function Cores() {
         description="Enter these values in your core."
         first
       />
-      <QueryAlert
-        error={sip.error ?? identity.error}
-        hasData={sip.data !== undefined && identity.data !== undefined}
-        subject="IMS identity"
-      />
+      <QueryAlert query={identity} subject="IMS identity" />
+      <QueryAlert query={sip} subject="SIP addresses" />
       <SettingsTable
         label="This IMS"
         loading={sip.isPending || identity.isPending}
@@ -424,11 +426,7 @@ export default function Cores() {
       >
         {routeStatus(route("cx"))}
       </SectionHeader>
-      <QueryAlert
-        error={routes.error}
-        hasData={routes.data !== undefined}
-        subject="Diameter routes"
-      />
+      <QueryAlert query={routes} subject="Diameter routes" />
       <SettingsTable
         label="HSS"
         loading={routes.isPending}
@@ -442,11 +440,7 @@ export default function Cores() {
       >
         {policy.data && policyStatus(policy.data, routes.data)}
       </SectionHeader>
-      <QueryAlert
-        error={policy.error}
-        hasData={policy.data !== undefined}
-        subject="voice QoS"
-      />
+      <QueryAlert query={policy} subject="voice QoS" />
       {policy.data?.interface === "none" && (
         <Alert severity="warning" sx={{ mb: 2 }}>
           Calls get no dedicated voice bearer.
@@ -463,11 +457,7 @@ export default function Cores() {
         title="SMS over IP"
         description="The built-in IP-SM-GW, which carries SMS between phones on IMS and your SMSC."
       />
-      <QueryAlert
-        error={ipsmgw.error}
-        hasData={ipsmgw.data !== undefined}
-        subject="IP-SM-GW"
-      />
+      <QueryAlert query={ipsmgw} subject="IP-SM-GW" />
       {ipsmgw.data?.number === "" && (
         <Alert severity="warning" sx={{ mb: 2 }}>
           No IP-SM-GW number: phones get no SMS over IP.
@@ -488,7 +478,10 @@ export default function Cores() {
             label: "IP-SM-GW Number",
             help: "Registered at the HSS for phones that can take SMS over IP.",
             value: ipsmgw.data && (ipsmgw.data.number || "—"),
-            onEdit: ipsmgw.data && (() => setEditingIPSMGW(true)),
+            onEdit:
+              ipsmgw.data && auth.can("ip_sm_gw:update")
+                ? () => setEditingIPSMGW(true)
+                : undefined,
           },
         ]}
       />
@@ -498,21 +491,18 @@ export default function Cores() {
         title={peers.data ? `Peers (${peers.data.length})` : "Peers"}
         description="The Diameter connections to your HSS, PCRF and SMSC."
       >
-        <Button
-          variant="contained"
-          color="success"
-          size="small"
-          startIcon={<AddIcon />}
-          onClick={() => setPeerDialog({})}
-        >
-          Add Peer
-        </Button>
+        {canDiameter && (
+          <Button
+            variant="contained"
+            color="success"
+            size="small"
+            onClick={() => setPeerDialog({})}
+          >
+            Create Peer
+          </Button>
+        )}
       </SectionHeader>
-      <QueryAlert
-        error={peers.error}
-        hasData={peers.data !== undefined}
-        subject="Diameter peers"
-      />
+      <QueryAlert query={peers} subject="Diameter peers" />
       {peers.isPending && <Skeleton variant="rounded" height={160} />}
       {peers.data && (
         <DataGrid<DiameterPeer>
@@ -541,21 +531,13 @@ export default function Cores() {
       )}
       {deleting && (
         <ConfirmDialog
-          title={
-            <>
-              Delete <DomainName name={peerName(deleting)} />?
-            </>
-          }
-          action="Delete"
+          title="Delete Peer"
+          description={`Delete ${peerName(deleting)}?${changesTransports(peers.data ?? [], deleting, undefined) ? ` ${RESTART_WARNING}` : ""}`}
+          confirmLabel="Delete"
           pending={deletion.isPending}
-          error={deletion.error}
           onConfirm={() => deletion.mutate(deleting)}
           onClose={() => setDeleting(null)}
-        >
-          {changesTransports(peers.data ?? [], deleting, undefined) && (
-            <Alert severity="warning">{RESTART_WARNING}</Alert>
-          )}
-        </ConfirmDialog>
+        />
       )}
       {editingRoute && (
         <EditRouteDialog

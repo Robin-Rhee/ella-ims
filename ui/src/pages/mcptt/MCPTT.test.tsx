@@ -3,7 +3,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import PushToTalk from "@/pages/mcptt/PushToTalk";
 import { alice, bob, fire, mcpttRoutes, mcpttStatus } from "@/test/mcptt";
-import { json, renderWithClient, stubApi } from "@/test/render";
+import { json, readOnlyAuth, renderWithClient, stubApi } from "@/test/render";
 
 const serve = (...args: Parameters<typeof mcpttRoutes>) => {
   const fetch = vi.fn(stubApi(mcpttRoutes(...args)));
@@ -48,6 +48,38 @@ describe("MCPTT pages", () => {
     expect(screen.getByText(/mcptt:/)).toBeInTheDocument();
   });
 
+  it("say why the status of the MCPTT server could not be loaded", async () => {
+    serve({
+      "/api/v1/mcptt": () => json(500, { error: "database is locked" }),
+    });
+    renderAt("users");
+
+    expect(
+      await screen.findByText("Could not load the status: database is locked"),
+    ).toBeInTheDocument();
+  });
+
+  it("hide every change from a Read Only user", async () => {
+    serve();
+    renderWithClient(
+      <MemoryRouter initialEntries={["/ptt/users"]}>
+        <Routes>
+          <Route path="/ptt/:tab" element={<PushToTalk />} />
+        </Routes>
+      </MemoryRouter>,
+      readOnlyAuth,
+    );
+
+    const grid = await screen.findByRole("grid", { name: "Users" });
+    await within(grid).findByText("Alice");
+    expect(
+      screen.queryByRole("button", { name: "Create User" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(grid).queryByRole("button", { name: /^(Edit|Delete) / }),
+    ).not.toBeInTheDocument();
+  });
+
   it("list the users, their groups and phones", async () => {
     serve();
     renderAt("users");
@@ -82,7 +114,7 @@ describe("MCPTT pages", () => {
     renderAt("users");
 
     await screen.findByText("Alice");
-    fireEvent.click(await screen.findByRole("button", { name: "Add User" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create User" }));
 
     const dialog = await screen.findByRole("dialog");
     fireEvent.change(within(dialog).getByRole("textbox", { name: "Name" }), {
@@ -108,7 +140,7 @@ describe("MCPTT pages", () => {
       ),
     ).toBeInTheDocument();
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create" }));
 
     await waitFor(() =>
       expect(requests(fetch, "POST", "/api/v1/mcptt/users")).toEqual([

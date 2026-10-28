@@ -8,7 +8,6 @@ import {
   Typography,
 } from "@mui/material";
 import {
-  Add as AddIcon,
   Delete as DeleteIcon,
   Edit as EditIcon,
   Mic as MicIcon,
@@ -17,6 +16,8 @@ import { DataGrid, type GridColDef } from "@mui/x-data-grid";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import QueryAlert from "@/components/QueryAlert";
+import { useAuth } from "@/contexts/AuthContext";
+import { errorMessage, useSnackbar } from "@/contexts/SnackbarContext";
 import GroupDialog from "@/components/mcptt/GroupDialog";
 import GroupDrawer from "@/components/mcptt/GroupDrawer";
 import { useMCPTTLive, useMCPTTSettings } from "@/hooks/useMCPTT";
@@ -28,6 +29,8 @@ const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
 export function GroupsTab() {
   const queryClient = useQueryClient();
+  const { showSnackbar } = useSnackbar();
+  const editable = useAuth().can("mcptt:update");
   const { users, groups, domain } = useMCPTTSettings();
   const { affiliations, calls } = useMCPTTLive();
   const [search, setSearch] = useState("");
@@ -41,6 +44,11 @@ export function GroupsTab() {
       void queryClient.invalidateQueries({ queryKey: mcpttKeys.groups });
       void queryClient.invalidateQueries({ queryKey: mcpttKeys.users });
       setDeleting(null);
+      showSnackbar("Group deleted successfully.", "success");
+    },
+    onError: (error) => {
+      setDeleting(null);
+      showSnackbar(`Failed to delete group: ${errorMessage(error)}`, "error");
     },
   });
 
@@ -63,7 +71,7 @@ export function GroupsTab() {
     return u ? userLabel(u, domain) : shortID(id, domain);
   };
 
-  const columns: GridColDef<Group>[] = [
+  const allColumns: GridColDef<Group>[] = [
     {
       field: "name",
       headerName: "Name",
@@ -155,6 +163,9 @@ export function GroupsTab() {
       ),
     },
   ];
+  const columns = editable
+    ? allColumns
+    : allColumns.filter((c) => c.field !== "actions");
 
   return (
     <>
@@ -175,21 +186,19 @@ export function GroupsTab() {
           placeholder="Name or group ID"
           sx={{ minWidth: 260 }}
         />
-        <Button
-          variant="contained"
-          color="success"
-          startIcon={<AddIcon />}
-          onClick={() => setDialog({})}
-          disabled={users.data === undefined}
-        >
-          Add Group
-        </Button>
+        {editable && (
+          <Button
+            variant="contained"
+            color="success"
+            onClick={() => setDialog({})}
+            disabled={users.data === undefined}
+          >
+            Create Group
+          </Button>
+        )}
       </Stack>
-      <QueryAlert
-        error={groups.error ?? users.error}
-        hasData={groups.data !== undefined}
-        subject="groups"
-      />
+      <QueryAlert query={groups} subject="groups" />
+      <QueryAlert query={users} subject="users" />
       <DataGrid<Group>
         aria-label="Groups"
         rows={rows}
@@ -223,18 +232,13 @@ export function GroupsTab() {
       )}
       {deleting && (
         <ConfirmDialog
-          title={`Delete ${groupLabel(deleting, domain)}?`}
-          action="Delete"
+          title="Delete Group"
+          description={`Delete ${groupLabel(deleting, domain)}? Its ${deleting.members.length} members can no longer call it, and no longer affiliate to it.`}
+          confirmLabel="Delete"
           pending={deletion.isPending}
-          error={deletion.error}
           onConfirm={() => deletion.mutate(deleting)}
           onClose={() => setDeleting(null)}
-        >
-          <Typography>
-            Its {deleting.members.length} members can no longer call it, and no
-            longer affiliate to it.
-          </Typography>
-        </ConfirmDialog>
+        />
       )}
       <GroupDrawer
         group={shown}

@@ -4,7 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { CssBaseline, ThemeProvider } from "@mui/material";
 import { BrowserRouter } from "react-router-dom";
 import App from "@/App";
-import theme from "@/utils/theme";
+import { SnackbarProvider } from "@/contexts/SnackbarContext";
+import theme, { THEME_PROVIDER_PROPS } from "@/utils/theme";
 import "./globals.css";
 
 const queryClient = new QueryClient();
@@ -12,11 +13,13 @@ const queryClient = new QueryClient();
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <ThemeProvider theme={theme}>
+      <ThemeProvider theme={theme} {...THEME_PROVIDER_PROPS}>
         <CssBaseline />
-        <BrowserRouter>
-          <App />
-        </BrowserRouter>
+        <SnackbarProvider>
+          <BrowserRouter>
+            <App />
+          </BrowserRouter>
+        </SnackbarProvider>
       </ThemeProvider>
     </QueryClientProvider>
   </React.StrictMode>,

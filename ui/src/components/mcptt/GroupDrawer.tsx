@@ -21,6 +21,8 @@ import {
 } from "@mui/icons-material";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { useAuth } from "@/contexts/AuthContext";
+import { errorMessage, useSnackbar } from "@/contexts/SnackbarContext";
 import CopyButton from "@/components/CopyButton";
 import DrawerSection from "@/components/DrawerSection";
 import Fields from "@/components/Fields";
@@ -56,10 +58,12 @@ function MemberRow({
   member: Member;
   name: string;
   affiliations: Affiliation[];
-  onEdit: () => void;
-  onRemove: () => void;
+  // onEdit and onRemove are absent for a role that cannot change the group, which sees the row read only.
+  onEdit?: () => void;
+  onRemove?: () => void;
 }) {
   const queryClient = useQueryClient();
+  const { showSnackbar } = useSnackbar();
   const toggle = useMutation({
     mutationFn: (on: boolean) =>
       putMember(group.group_id, { ...member, implicit_affiliation: on }),
@@ -67,6 +71,10 @@ function MemberRow({
       void queryClient.invalidateQueries({ queryKey: mcpttKeys.groups });
       void queryClient.invalidateQueries({ queryKey: mcpttKeys.users });
       void queryClient.invalidateQueries({ queryKey: mcpttKeys.affiliations });
+      showSnackbar("Member updated successfully.", "success");
+    },
+    onError: (error) => {
+      showSnackbar(`Failed to update member: ${errorMessage(error)}`, "error");
     },
   });
   const implicit = member.implicit_affiliation ?? false;
@@ -86,21 +94,25 @@ function MemberRow({
           <Switch
             size="small"
             checked={implicit}
-            disabled={toggle.isPending}
+            disabled={toggle.isPending || !onEdit}
             onChange={(e) => toggle.mutate(e.target.checked)}
             slotProps={{ input: { "aria-label": `${name} always affiliated` } }}
           />
         </Tooltip>
-        <IconButton size="small" aria-label={`Edit ${name}`} onClick={onEdit}>
-          <EditIcon fontSize="small" color="primary" />
-        </IconButton>
-        <IconButton
-          size="small"
-          aria-label={`Remove ${name}`}
-          onClick={onRemove}
-        >
-          <DeleteIcon fontSize="small" color="primary" />
-        </IconButton>
+        {onEdit && (
+          <IconButton size="small" aria-label={`Edit ${name}`} onClick={onEdit}>
+            <EditIcon fontSize="small" color="primary" />
+          </IconButton>
+        )}
+        {onRemove && (
+          <IconButton
+            size="small"
+            aria-label={`Remove ${name}`}
+            onClick={onRemove}
+          >
+            <DeleteIcon fontSize="small" color="primary" />
+          </IconButton>
+        )}
       </Stack>
       {member.recvonly && (
         <Chip
@@ -135,6 +147,8 @@ function GroupDetail({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
+  const { showSnackbar } = useSnackbar();
+  const editable = useAuth().can("mcptt:update");
   const [memberDialog, setMemberDialog] = useState<{ member?: Member } | null>(
     null,
   );
@@ -145,6 +159,11 @@ function GroupDetail({
       void queryClient.invalidateQueries({ queryKey: mcpttKeys.groups });
       void queryClient.invalidateQueries({ queryKey: mcpttKeys.users });
       setRemoving(null);
+      showSnackbar("Member removed successfully.", "success");
+    },
+    onError: (error) => {
+      setRemoving(null);
+      showSnackbar(`Failed to remove member: ${errorMessage(error)}`, "error");
     },
   });
 
@@ -219,13 +238,15 @@ function GroupDetail({
           >
             Members ({group.members.length})
           </Typography>
-          <Button
-            size="small"
-            startIcon={<AddIcon />}
-            onClick={() => setMemberDialog({})}
-          >
-            Add Member
-          </Button>
+          {editable && (
+            <Button
+              size="small"
+              startIcon={<AddIcon />}
+              onClick={() => setMemberDialog({})}
+            >
+              Add Member
+            </Button>
+          )}
         </Stack>
         {group.members.length === 0 ? (
           <Typography variant="body2" color="text.secondary">
@@ -242,11 +263,17 @@ function GroupDetail({
                 affiliations={own.filter((a) =>
                   sameIdentity(a.mcptt_id, m.mcptt_id),
                 )}
-                onEdit={() => setMemberDialog({ member: m })}
-                onRemove={() => {
-                  removal.reset();
-                  setRemoving(m);
-                }}
+                onEdit={
+                  editable ? () => setMemberDialog({ member: m }) : undefined
+                }
+                onRemove={
+                  editable
+                    ? () => {
+                        removal.reset();
+                        setRemoving(m);
+                      }
+                    : undefined
+                }
               />
             ))}
           </Box>
@@ -263,18 +290,13 @@ function GroupDetail({
       )}
       {removing && (
         <ConfirmDialog
-          title={`Remove ${nameOf(removing.mcptt_id)} from ${groupLabel(group, domain)}?`}
-          action="Remove"
+          title="Remove Member"
+          description={`Remove ${nameOf(removing.mcptt_id)} from ${groupLabel(group, domain)}? The user leaves the group's call in progress, if any, and can no longer call the group nor hear its calls.`}
+          confirmLabel="Remove"
           pending={removal.isPending}
-          error={removal.error}
           onConfirm={() => removal.mutate(removing)}
           onClose={() => setRemoving(null)}
-        >
-          <Typography>
-            The user leaves the group's call in progress, if any, and can no
-            longer call the group nor hear its calls.
-          </Typography>
-        </ConfirmDialog>
+        />
       )}
     </Stack>
   );

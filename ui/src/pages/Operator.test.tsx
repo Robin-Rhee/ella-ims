@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import Operator from "@/pages/Operator";
 import type { Operator as OperatorSettings } from "@/queries/operator";
-import { json, renderWithClient, stubApi } from "@/test/render";
+import { json, readOnlyAuth, renderWithClient, stubApi } from "@/test/render";
 
 const operator: OperatorSettings = {
   mcc: "001",
@@ -51,6 +51,16 @@ afterEach(() => {
 });
 
 describe("Operator", () => {
+  it("offers no edit to a Read Only user", async () => {
+    serve(() => json(500, {}));
+    renderWithClient(<Operator />, readOnlyAuth);
+
+    expect(await screen.findByText("001 / 01")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^Edit / }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows the operator settings", async () => {
     serve(() => json(500, {}));
 
@@ -60,7 +70,7 @@ describe("Operator", () => {
     expect(rows()).toEqual([
       "001 / 01",
       "ims.mnc001.mcc001.3gppnetwork.org",
-      "Country Code+1National PrefixNoneInternational PrefixNone",
+      "Country Code1National PrefixN/AInternational PrefixN/A",
     ]);
     expect(
       screen.queryByRole("button", { name: "Edit Home Network Domain" }),
@@ -76,7 +86,7 @@ describe("Operator", () => {
     fireEvent.mouseOver(screen.getByText("Operator ID (MCC/MNC)"));
     expect(
       await screen.findByRole("tooltip", {
-        name: "Must match your subscribers' IMSIs and your core.",
+        name: "Mobile Country Code and Mobile Network Code of your network. They set this IMS's home network domain, Diameter host and realm.",
       }),
     ).toBeInTheDocument();
   });
@@ -133,9 +143,7 @@ describe("Operator", () => {
 
     renderWithClient(<Operator />);
     await loaded();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Edit Numbering Plan" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit Numbering" }));
 
     fill("Country Code", "33");
     fill("National Prefix", "0");
@@ -173,9 +181,7 @@ describe("Operator", () => {
 
     renderWithClient(<Operator />);
     await loaded();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Edit Numbering Plan" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit Numbering" }));
     fill("Country Code", "33");
     fireEvent.click(screen.getByRole("button", { name: "Update" }));
 

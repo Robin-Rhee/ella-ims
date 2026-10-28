@@ -19,6 +19,8 @@ import MediaIcons from "@/components/MediaIcons";
 import DomainName from "@/components/DomainName";
 import PageHeader from "@/components/PageHeader";
 import QueryAlert from "@/components/QueryAlert";
+import { useAuth } from "@/contexts/AuthContext";
+import { errorMessage, useSnackbar } from "@/contexts/SnackbarContext";
 import RegistrationDrawer from "@/components/RegistrationDrawer";
 import SignallingPathChip from "@/components/SignallingPathChip";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
@@ -34,6 +36,7 @@ import {
   signallingPathOf,
   subscriberOf,
 } from "@/utils/registrations";
+import { GRID_SX } from "@/utils/layout";
 
 export const REGISTRATIONS_REFRESH_MS = 5000;
 
@@ -122,9 +125,10 @@ const columnsFor = (
 ];
 
 const gridSx = {
-  bgcolor: "background.paper",
+  ...GRID_SX,
   "& .MuiDataGrid-row": { cursor: "pointer" },
   "& .MuiDataGrid-cell": {
+    ...GRID_SX["& .MuiDataGrid-cell"],
     display: "flex",
     alignItems: "center",
     py: 1,
@@ -141,15 +145,34 @@ export default function Registrations() {
   const [selected, setSelected] = useState<Registration | null>(null);
   const [reauthing, setReauthing] = useState<Registration | null>(null);
 
+  const { showSnackbar } = useSnackbar();
   const reauth = useMutation({
     mutationFn: (r: Registration) => reauthenticate(r.impi),
-    onSuccess: () => setReauthing(null),
+    onSuccess: () => {
+      setReauthing(null);
+      showSnackbar("Re-authentication requested successfully.", "success");
+    },
+    onError: (error) => {
+      setReauthing(null);
+      showSnackbar(
+        `Failed to re-authenticate: ${errorMessage(error)}`,
+        "error",
+      );
+    },
   });
-  const columns = useMemo(() => columnsFor(setReauthing), []);
+  // A role that cannot re-authenticate has no Actions column.
+  const canReauthenticate = useAuth().can("registration:reauthenticate");
+  const columns = useMemo(
+    () =>
+      canReauthenticate
+        ? columnsFor(setReauthing)
+        : columnsFor(setReauthing).filter((c) => c.field !== "actions"),
+    [canReauthenticate],
+  );
 
   const debouncedSearch = useDebouncedValue(search.trim(), SEARCH_DEBOUNCE_MS);
 
-  const { data, error, isFetching } = useQuery({
+  const registrations = useQuery({
     queryKey: ["registrations", debouncedSearch, pagination],
     queryFn: () =>
       listRegistrations({
@@ -160,6 +183,7 @@ export default function Registrations() {
     placeholderData: (prev) => prev,
     refetchInterval: REGISTRATIONS_REFRESH_MS,
   });
+  const { data, isFetching } = registrations;
 
   // The drawer follows the refreshed list, and keeps the registration it shows once it leaves the list.
   const shown = selected
@@ -187,11 +211,7 @@ export default function Registrations() {
           sx={{ minWidth: 260 }}
         />
       </Stack>
-      <QueryAlert
-        error={error}
-        hasData={data !== undefined}
-        subject="registrations"
-      />
+      <QueryAlert query={registrations} subject="registrations" />
       <DataGrid<Registration>
         aria-labelledby="registrations-title"
         rows={data?.items ?? []}
@@ -219,21 +239,13 @@ export default function Registrations() {
       />
       {reauthing && (
         <ConfirmDialog
-          title={`Re-authenticate ${numbersOf(reauthing)[0] ?? subscriberOf(reauthing.impi)}?`}
-          action="Re-authenticate"
+          title="Re-authenticate Subscriber"
+          description={`Re-authenticate ${numbersOf(reauthing)[0] ?? subscriberOf(reauthing.impi)}? Its phones are asked to register again soon, authenticating anew with the HSS.`}
+          confirmLabel="Re-authenticate"
           pending={reauth.isPending}
-          error={reauth.error}
           onConfirm={() => reauth.mutate(reauthing)}
-          onClose={() => {
-            setReauthing(null);
-            reauth.reset();
-          }}
-        >
-          <Typography>
-            Its phones are asked to register again soon, authenticating anew
-            with the HSS.
-          </Typography>
-        </ConfirmDialog>
+          onClose={() => setReauthing(null)}
+        />
       )}
       <RegistrationDrawer
         registration={shown}
