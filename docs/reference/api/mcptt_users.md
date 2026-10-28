@@ -27,7 +27,7 @@ This path returns the list of users, in the order they were created in.
 | ----------------------- | ------ | ----------- |
 | `mcptt_id`              | string | MCPTT ID of the user. |
 | `alias`                 | string | Alias of the user (TS 24.484 §8.3.2.7). Empty if none. |
-| `impus`                 | array  | IMS public user identities of the user. |
+| `impus`                 | array  | IMS public user identities of the user, such as `sip:mcptt-<MSISDN>@<home domain>`. |
 | `implicit_affiliations` | array  | Group IDs the user's clients are affiliated to when they register. |
 
 ### Sample Response
@@ -39,19 +39,19 @@ This path returns the list of users, in the order they were created in.
             {
                 "mcptt_id": "sip:alice@mcptt.example.com",
                 "alias": "Alice",
-                "impus": ["sip:15550000001@ims.mnc001.mcc001.3gppnetwork.org"],
+                "impus": ["sip:mcptt-15550000001@ims.mnc001.mcc001.3gppnetwork.org"],
                 "implicit_affiliations": ["sip:fire@mcptt.example.com"]
             },
             {
                 "mcptt_id": "sip:carol@mcptt.example.com",
                 "alias": "Carol",
-                "impus": ["sip:15550000003@ims.mnc001.mcc001.3gppnetwork.org"],
+                "impus": ["sip:mcptt-15550000003@ims.mnc001.mcc001.3gppnetwork.org"],
                 "implicit_affiliations": ["sip:police@mcptt.example.com"]
             },
             {
                 "mcptt_id": "sip:bob@mcptt.example.com",
                 "alias": "Bob",
-                "impus": ["sip:15550000002@ims.mnc001.mcc001.3gppnetwork.org"],
+                "impus": ["sip:mcptt-15550000002@ims.mnc001.mcc001.3gppnetwork.org"],
                 "implicit_affiliations": []
             }
         ],
@@ -89,7 +89,7 @@ This path returns the details of a specific user.
     "result": {
         "mcptt_id": "sip:alice@mcptt.example.com",
         "alias": "Alice",
-        "impus": ["sip:15550000001@ims.mnc001.mcc001.3gppnetwork.org"],
+        "impus": ["sip:mcptt-15550000001@ims.mnc001.mcc001.3gppnetwork.org"],
         "implicit_affiliations": ["sip:fire@mcptt.example.com"]
     }
 }
@@ -124,7 +124,7 @@ This path creates a user.
 {
     "mcptt_id": "sip:alice@mcptt.example.com",
     "alias": "Alice",
-    "impus": ["sip:15550000001@ims.mnc001.mcc001.3gppnetwork.org"]
+    "impus": ["sip:mcptt-15550000001@ims.mnc001.mcc001.3gppnetwork.org"]
 }
 ```
 
@@ -135,7 +135,7 @@ This path creates a user.
     "result": {
         "mcptt_id": "sip:alice@mcptt.example.com",
         "alias": "Alice",
-        "impus": ["sip:15550000001@ims.mnc001.mcc001.3gppnetwork.org"],
+        "impus": ["sip:mcptt-15550000001@ims.mnc001.mcc001.3gppnetwork.org"],
         "implicit_affiliations": []
     }
 }
@@ -167,7 +167,7 @@ This path replaces a user. The request body is that of [Create a User](#create-a
 ```json
 {
     "alias": "Carol",
-    "impus": ["sip:15550000003@ims.mnc001.mcc001.3gppnetwork.org"],
+    "impus": ["sip:mcptt-15550000003@ims.mnc001.mcc001.3gppnetwork.org"],
     "implicit_affiliations": ["sip:police@mcptt.example.com"]
 }
 ```
@@ -179,7 +179,7 @@ This path replaces a user. The request body is that of [Create a User](#create-a
     "result": {
         "mcptt_id": "sip:carol@mcptt.example.com",
         "alias": "Carol",
-        "impus": ["sip:15550000003@ims.mnc001.mcc001.3gppnetwork.org"],
+        "impus": ["sip:mcptt-15550000003@ims.mnc001.mcc001.3gppnetwork.org"],
         "implicit_affiliations": ["sip:police@mcptt.example.com"]
     }
 }

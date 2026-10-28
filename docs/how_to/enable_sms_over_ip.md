@@ -23,7 +23,8 @@ Under **Peers**, click **Add Peer**, and enter:
 - **Address**: `10.3.0.7`.
 - **Roles**: **SGd** only.
 - **Service Centres**: `15550000000`.
-- **Host**: the SMSC's Diameter identity, e.g. `smsc.epc.mnc001.mcc001.3gppnetwork.org`.
+- **Transport**: **SCTP**, for Ella SMSC.
+- **Host**: the SMSC's Diameter identity, e.g. `smsc.node.epc.mnc001.mcc001.3gppnetwork.org` for Ella SMSC.
 
 Click **Add**.
 
@@ -33,7 +34,13 @@ Edit the HSS peer, check **Sh** and **S6c**, and click **Update**. If the HSS's 
 
 ## 4. Add iFCs in the HSS
 
-In the HSS, add two iFCs to the subscribers' service profiles, with the **IP-SM-GW Name** of the **Cores** page as the server name, e.g. `sip:ipsmgw.ims.mnc001.mcc001.3gppnetwork.org`, and default handling `SESSION_CONTINUED`:
+With Ella Core:
+
+- **Operator → IMS → Add Application Server**: name `ip-sm-gw`, the **IP-SM-GW Name** of the **Cores** page as the **Server Name**, then **Add**.
+- **Operator → IMS → Add Service Profile**: name `sms-over-ip`; under **Add from preset**, select the **SMS over IP** preset and the `ip-sm-gw` **Application Server**, click **Add Criteria**, then click **Add**.
+- **Profiles →** the subscribers' profile **→** edit **IMS Service Profiles**: set **MMTel (voice, SMS)** to `sms-over-ip`, then **Save**.
+
+With another HSS, add two iFCs to the subscribers' service profiles, with the **IP-SM-GW Name** of the **Cores** page as the server name, e.g. `sip:ipsmgw.ims.mnc001.mcc001.3gppnetwork.org`, and default handling `SESSION_CONTINUED`:
 
 - A trigger point on method `REGISTER`, with the subscriber's MSISDN as the service information, and **Include Register Request** and **Include Register Response** set.
 - A trigger point on method `MESSAGE`, session case `ORIGINATING_REGISTERED`, and header `Content-Type` matching `application/vnd\.3gpp\.sms`.

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   expandID,
   expandIMPU,
+  isMCPTTIdentity,
   formatDuration,
   formatElapsed,
   identityKey,
@@ -21,9 +22,13 @@ describe("mcptt identities", () => {
     expect(expandID("two words", domain)).toBeUndefined();
   });
 
-  it("expands an IMPU of a number to its tel URI, as Ella Core's HSS has it", () => {
-    expect(expandIMPU("15550000001", home)).toBe("tel:+15550000001");
-    expect(expandIMPU("+15550000001", home)).toBe("tel:+15550000001");
+  it("expands an IMPU of a number to its MCPTT identity, as Ella Core's HSS has it", () => {
+    expect(expandIMPU("15550000001", home)).toBe(
+      `sip:mcptt-15550000001@${home}`,
+    );
+    expect(expandIMPU("+15550000001", home)).toBe(
+      `sip:mcptt-15550000001@${home}`,
+    );
     expect(expandIMPU("alice", home)).toBe(
       "sip:alice@ims.mnc001.mcc001.3gppnetwork.org",
     );
@@ -67,5 +72,13 @@ describe("mcptt durations", () => {
     expect(formatElapsed("2026-10-25T12:00:00Z", at + 3_725_000)).toBe(
       "1:02:05",
     );
+  });
+});
+
+describe("isMCPTTIdentity", () => {
+  it("tells the MCPTT identity from the voice and SMS identities", () => {
+    expect(isMCPTTIdentity("sip:mcptt-15550000001@ims.example.org")).toBe(true);
+    expect(isMCPTTIdentity("sip:+15550000001@ims.example.org")).toBe(false);
+    expect(isMCPTTIdentity("tel:+15550000001")).toBe(false);
   });
 });

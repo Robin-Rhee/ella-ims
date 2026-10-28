@@ -13,6 +13,7 @@ import { listRegistrations } from "@/queries/registrations";
 import {
   expandID,
   expandIMPU,
+  isMCPTTIdentity,
   groupLabel,
   groupsOf,
   sameIdentity,
@@ -62,7 +63,7 @@ export default function UserDialog({
     ...new Set(
       (registered.data?.items ?? []).flatMap((r) =>
         identitiesOf(r)
-          .filter((i) => !i.barred)
+          .filter((i) => !i.barred && isMCPTTIdentity(i.uri))
           .map((i) => i.uri),
       ),
     ),
@@ -184,7 +185,7 @@ export default function UserDialog({
                 ? errors.impus
                 : pendingIMPU
                   ? `Adds ${pendingIMPU}`
-                  : "The phones' public identities, as your HSS has them: pick a registered one, or type a number for tel:+<number>."
+                  : `The MCPTT identities of the phones, as your HSS has them: pick a registered one, or type an MSISDN for sip:mcptt-<MSISDN>@${homeDomain}.`
             }
           />
         )}
