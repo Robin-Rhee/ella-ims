@@ -32,6 +32,15 @@ func (u *UE) Register(ctx context.Context) error {
 	u.op.Lock()
 	defer u.op.Unlock()
 
+	// TS 24.229 §5.1.9: no initial registration through a P-CSCF marked unavailable.
+	u.mu.Lock()
+	pcscf, marked := u.pcscf, u.markedLocked(u.pcscf)
+	u.mu.Unlock()
+
+	if marked {
+		return fmt.Errorf("%w: %s", ErrPCSCFUnavailable, pcscf)
+	}
+
 	if err := u.ready(); err != nil {
 		return err
 	}
@@ -58,9 +67,17 @@ func (u *UE) Register(ctx context.Context) error {
 
 func (u *UE) Reregister(ctx context.Context) error {
 	u.op.Lock()
-	defer u.op.Unlock()
+	err := u.refresh(ctx, false)
+	u.op.Unlock()
 
-	return u.refresh(ctx, false)
+	// TS 24.229 §5.1.1.4.1: a reregistration that timer F ended, or a fatal transport error (NOTE 13: by other means
+	// than timer F), is followed by an initial registration: the owner registers again, on a new flow. Out of the
+	// operation, which the handlers that Drop waits for may take.
+	if errors.Is(err, transaction.ErrTimeout) || errors.Is(err, transaction.ErrTransport) {
+		u.flowFailed(err)
+	}
+
+	return err
 }
 
 func (u *UE) Deregister(ctx context.Context) error {
@@ -487,6 +504,10 @@ func (u *UE) succeeded(p *procedure, temp *saSet, res *sip.Response) {
 		impus = u.state.IMPUs
 	}
 
+	// The P-CSCF the contact is bound through, which a registration resets the failures of (RFC 5626 §4.5).
+	u.registeredVia = u.pcscf
+	delete(u.marks, u.pcscf)
+
 	u.auth = p.auth
 	u.state = State{
 		Registered:     true,
@@ -562,14 +583,35 @@ func (u *UE) keepalive() {
 	}
 }
 
-// flowFailed ends the registration whose flow failed, a keep-alive not answered or a listener of the UE failed: its
-// SAs go, and the owner registers again (RFC 5626 §4.4, §4.5), Register forming a new flow.
+// flowFailed ends the registration whose flow failed: its SAs go, the UE stops processing the dialogs and
+// transactions of the flow, sending nothing on their behalf (TS 24.229 §5.1.1.4.1, NOTE 13), and the owner registers
+// again (RFC 5626 §4.4, §4.5), Register forming a new flow. Not called from a handler, whose strand Drop waits for.
 func (u *UE) flowFailed(err error) {
+	// The dialogs of the flow are stopped even when another failure, of a request, unbound the contact first.
+	bound := u.unbind()
+
+	u.mu.Lock()
+	closed := u.closed
+	u.mu.Unlock()
+
+	if closed {
+		return
+	}
+
+	u.agent.Drop(func(sip.Flow) bool { return true })
+
+	if bound {
+		u.event(Event{Deregistered: DeregisteredFlowFailed, Err: err})
+	}
+}
+
+// unbind ends the registration, its SAs gone, and reports whether there was one.
+func (u *UE) unbind() bool {
 	u.mu.Lock()
 
 	if u.closed || !u.state.Registered {
 		u.mu.Unlock()
-		return
+		return false
 	}
 
 	after := u.forgetLocked()
@@ -582,7 +624,61 @@ func (u *UE) flowFailed(err error) {
 	u.mu.Unlock()
 
 	after()
-	u.event(Event{Deregistered: DeregisteredFlowFailed, Err: err})
+
+	return true
+}
+
+// requestFailed is a request of the UE through the P-CSCF failing in its transaction: other than a REGISTER, timer F
+// or a fatal transport error in Trying of a non-INVITE, timer B or a fatal transport error in Calling of an INVITE,
+// leave the contact bound to no public user identity and mark the P-CSCF unavailable (TS 24.229 §5.1.2A.1.6): the
+// registration ends, its flow dead with the multiple registration mechanism, and the owner registers again, through
+// another P-CSCF if it has one. The dialogs are left to the owner. It runs on a goroutine of its own: the transaction
+// tells it on a strand, whose handlers ending the registration waits for.
+func (u *UE) requestFailed(req *sip.Request, in transaction.State, err error) {
+	if req.Method == "REGISTER" || !errors.Is(err, transaction.ErrTimeout) && !errors.Is(err, transaction.ErrTransport) {
+		return
+	}
+
+	if req.Method == "INVITE" && in != transaction.Calling || req.Method != "INVITE" && in != transaction.Trying {
+		return
+	}
+
+	go func() {
+		// The P-CSCF the contact was registered through (§5.1.2A.1.6 B), which the request went to a port of.
+		u.mu.Lock()
+
+		pcscf := u.registeredVia
+		bound := !u.closed && u.state.Registered && req.Flow.Remote.Addr() == pcscf.Addr()
+
+		if bound {
+			u.markLocked(pcscf)
+		}
+
+		u.mu.Unlock()
+
+		if bound && u.unbind() {
+			u.event(Event{Deregistered: DeregisteredFlowFailed, Err: err, UnavailablePCSCF: pcscf})
+		}
+	}()
+}
+
+// connectionLost is a TCP connection of the UE ending, of flow f: that of an outbound registration is its flow, which
+// failed (RFC 5626 §3, §4.4). Without outbound, the registration outlives its connections, the P-CSCF opening one of
+// its own to reach the UE.
+func (u *UE) connectionLost(f sip.Flow, err error) {
+	u.mu.Lock()
+	outbound := !u.closed && u.state.Registered && u.state.Outbound
+	u.mu.Unlock()
+
+	if !outbound {
+		return
+	}
+
+	if flow, _, ferr := u.requestFlow(u.cfg.Transport); ferr != nil || flow != f {
+		return
+	}
+
+	u.flowFailed(err)
 }
 
 // listenerFailed is a listener of the UE failing for good, of its unprotected port or of a protected one, as when the

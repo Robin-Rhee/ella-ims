@@ -137,11 +137,14 @@ type PCF struct {
 	violations []string
 	nextID     int
 	sessions   map[string]*appSession
-	moved      map[string]string
-	refuse     func(Request) *Failure
-	answer     func(Request) *n5.EventsNotification
-	hold       chan struct{}
-	abandoned  int
+	// pending are the contexts a create or a delete of is under way, recorded but not answered yet: each channel closes
+	// once the context is created or deleted, or the request refused.
+	pending   map[string]chan struct{}
+	moved     map[string]string
+	refuse    func(Request) *Failure
+	answer    func(Request) *n5.EventsNotification
+	hold      chan struct{}
+	abandoned int
 }
 
 func New(t testing.TB, cfg Config) *PCF {
@@ -185,6 +188,7 @@ func New(t testing.TB, cfg Config) *PCF {
 		client:   &http.Client{Transport: transport, Timeout: notificationTimeout},
 		requests: make(chan Request, 1024),
 		sessions: make(map[string]*appSession),
+		pending:  make(map[string]chan struct{}),
 		moved:    make(map[string]string),
 	}
 
@@ -419,10 +423,44 @@ func Signalling(c Context) bool {
 	return true
 }
 
+// settle marks a create or a delete of the context id under way, until the function it returns ends it.
+func (p *PCF) settle(id string) func() {
+	done := make(chan struct{})
+
+	p.mu.Lock()
+	p.pending[id] = done
+	p.mu.Unlock()
+
+	return func() {
+		p.mu.Lock()
+		delete(p.pending, id)
+		p.mu.Unlock()
+		close(done)
+	}
+}
+
+// settled is the context at uri, once a create or a delete of it recorded (Next) is done: a PCF tells of a context
+// only after it created it, and not after it deleted it.
+func (p *PCF) settled(ctx context.Context, uri string) (Context, bool) {
+	p.mu.Lock()
+	pending := p.pending[p.id(uri)]
+	p.mu.Unlock()
+
+	if pending != nil {
+		select {
+		case <-pending:
+		case <-ctx.Done():
+			return Context{}, false
+		}
+	}
+
+	return p.Context(uri)
+}
+
 // Terminate asks the consumer to delete the context at uri (TS 29.514 §4.2.5.3). The context stays until the
 // consumer deletes it.
 func (p *PCF) Terminate(ctx context.Context, uri string, cause n5.TerminationCause) (Response, error) {
-	c, ok := p.Context(uri)
+	c, ok := p.settled(ctx, uri)
 	if !ok {
 		return Response{}, fmt.Errorf("pcftest: no context at %q", uri)
 	}
@@ -433,7 +471,7 @@ func (p *PCF) Terminate(ctx context.Context, uri string, cause n5.TerminationCau
 // Notify reports events of the context at uri to its events subscription (TS 29.514 §4.2.5.2). Every event must
 // be subscribed to. An empty evSubsUri is the context's Events Subscription sub-resource.
 func (p *PCF) Notify(ctx context.Context, uri string, n n5.EventsNotification) (Response, error) {
-	c, ok := p.Context(uri)
+	c, ok := p.settled(ctx, uri)
 	if !ok {
 		return Response{}, fmt.Errorf("pcftest: no context at %q", uri)
 	}
@@ -638,6 +676,8 @@ func (p *PCF) create(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	id := p.newID()
 	p.mu.Unlock()
+
+	defer p.settle(id)()
 
 	req := Request{Op: n5.OpCreate, URI: p.uri(id), Create: &asc}
 
@@ -844,6 +884,8 @@ func (p *PCF) delete(w http.ResponseWriter, r *http.Request, id string) {
 	if !ok {
 		return
 	}
+
+	defer p.settle(id)()
 
 	req := Request{Op: n5.OpDelete, URI: p.uri(id)}
 

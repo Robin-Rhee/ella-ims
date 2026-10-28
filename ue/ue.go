@@ -172,6 +172,11 @@ type State struct {
 	Barred bool
 
 	IMPUs []string
+
+	// UnavailablePCSCFs are the P-CSCF addresses marked unavailable, a request through one having timed out or failed
+	// in transport (TS 24.229 §5.1.2A.1.6), until the mark expires (§5.1.9): the UE registers through none of them;
+	// the owner selects another one (SetPCSCF) if it has, or discovers them anew (ClearPCSCFMarks).
+	UnavailablePCSCFs []netip.AddrPort
 }
 
 type Event struct {
@@ -184,6 +189,10 @@ type Event struct {
 	// NOTIFY of Request, or on its expiry; RetryAfter, of DeregisteredProbation, when to register again.
 	Deregistered Deregistration
 	RetryAfter   time.Duration
+
+	// UnavailablePCSCF, with DeregisteredFlowFailed, is the P-CSCF that the failure of a request marked unavailable
+	// (TS 24.229 §5.1.2A.1.6).
+	UnavailablePCSCF netip.AddrPort
 }
 
 // Deregistration is how the registration of a UE ended without a REGISTER of its own: the event of its contacts in
@@ -210,10 +219,14 @@ const (
 	// DeregisteredExpired is the registration expiring, not refreshed in time.
 	DeregisteredExpired Deregistration = "expired"
 
-	// DeregisteredFlowFailed is the flow of the registration failing: a keep-alive not answered (RFC 5626 §4.4.1), or a
-	// listener of the UE failing for good, as its sockets destroyed with the network (TS 24.229 §5.1.1.4.1 NOTE 13);
-	// Event.Err is why. The UE is to register again (RFC 5626 §4.5): Register forms the new flow, listening again on
-	// the ports that failed.
+	// DeregisteredFlowFailed is the flow of the registration failing: a keep-alive not answered (RFC 5626 §4.4.1), the
+	// TCP connection of an outbound registration lost (RFC 5626 §4.4), a listener of the UE failing for good, as its
+	// sockets destroyed with the network (TS 24.229 §5.1.1.4.1 NOTE 13), or a reregistration ended by timer F (TS
+	// 24.229 §5.1.1.4.1) or a fatal transport error (its NOTE 13): the UE stopped processing its dialogs and
+	// transactions, which end with ua.EndDropped. Or another request through the P-CSCF timed out or failed in
+	// transport, leaving the contact bound to nothing and the P-CSCF unavailable (TS 24.229 §5.1.2A.1.6,
+	// Event.UnavailablePCSCF). Event.Err is why. The UE is to register again (RFC 5626 §4.5): Register forms the new
+	// flow, listening again on the ports that failed.
 	DeregisteredFlowFailed Deregistration = "flow-failed"
 )
 
@@ -250,12 +263,16 @@ type UE struct {
 
 	op sync.Mutex
 
-	mu          sync.Mutex
-	closed      bool
-	pcscf       netip.AddrPort
-	ani         string
-	clientPorts []uint16
-	retired     []uint16
+	mu     sync.Mutex
+	closed bool
+	pcscf  netip.AddrPort
+	// marks are the P-CSCF addresses marked unavailable (State.UnavailablePCSCFs); registeredVia is the P-CSCF the
+	// contact was last registered through.
+	marks         map[netip.AddrPort]pcscfMark
+	registeredVia netip.AddrPort
+	ani           string
+	clientPorts   []uint16
+	retired       []uint16
 	// failed are the ports whose listeners failed, listened on again before the next registration.
 	failed      []uint16
 	pending     int
@@ -338,6 +355,7 @@ func New(cfg Config) (*UE, error) {
 		auto:    true,
 		pcscf:   cfg.PCSCF,
 		ani:     cfg.AccessNetworkInfo,
+		marks:   map[netip.AddrPort]pcscfMark{},
 	}
 
 	if len(u.offers) == 0 {
@@ -404,6 +422,8 @@ func New(cfg Config) (*UE, error) {
 			},
 			// TS 24.229 §5.1.1.4.1 NOTE 13: a listener failing is the flow of the registration failing.
 			OnListenerFailed: u.listenerFailed,
+			OnConnectionLost: u.connectionLost,
+			OnClientError:    u.requestFailed,
 		},
 		Prepare: u.prepare,
 		Respond: u.respondHeaders,
@@ -527,6 +547,7 @@ func (u *UE) State() State {
 	s.AssociatedURIs = slices.Clone(s.AssociatedURIs)
 	s.ServiceRoute = slices.Clone(s.ServiceRoute)
 	s.IMPUs = slices.Clone(s.IMPUs)
+	s.UnavailablePCSCFs = u.unavailableLocked()
 
 	return s
 }

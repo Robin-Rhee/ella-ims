@@ -1,10 +1,13 @@
 package transaction
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 
 	"github.com/ellanetworks/ims/sip"
+	"github.com/ellanetworks/ims/sip/transport"
 )
 
 type ClientHandler interface {
@@ -117,9 +120,17 @@ func (tx *ClientTransaction) CancelWith(prepare func(cancel *sip.Request)) error
 	return nil
 }
 
+// sentResult takes the outcome of sending the request: a failure toward the network is a transport error (RFC 3261
+// §17.1.4, §18.4). Once sent, the request waits for its response, which can come on another connection than the one
+// it went out on (§18.2.2), or for its timer.
 func (tx *ClientTransaction) sentResult(sent *sip.Request, err error) {
 	if err != nil {
-		tx.fail(err)
+		if networkFailure(err) {
+			err = fmt.Errorf("%w: %w", ErrTransport, err)
+		}
+
+		tx.failClient(err)
+
 		return
 	}
 
@@ -133,6 +144,28 @@ func (tx *ClientTransaction) sentResult(sent *sip.Request, err error) {
 	for _, res := range early {
 		tx.handle(res)
 	}
+}
+
+// networkFailure reports whether err, of sending a request, is the network's: not the layer closing, nor a local
+// failure, such as no listener on the local address, which the next hop has nothing to do with.
+func networkFailure(err error) bool {
+	return !errors.Is(err, ErrClosed) && !errors.Is(err, transport.ErrNoListener) &&
+		!errors.Is(err, transport.ErrUnsupportedTransport)
+}
+
+// failClient fails the transaction, and tells the layer's OnClientError of it, with the state it failed in.
+func (tx *ClientTransaction) failClient(err error) {
+	if tx.state == Terminated {
+		return
+	}
+
+	// Told before the transaction's user, in the order of the transaction's events.
+	if f := tx.layer.onClientError; f != nil {
+		in, req := tx.state, tx.req
+		tx.emit(func() { f(req, in, err) })
+	}
+
+	tx.fail(err)
 }
 
 func (tx *ClientTransaction) sendCancel() {
@@ -216,7 +249,7 @@ func (tx *ClientTransaction) handleInvite(res *sip.Response) {
 
 		ack, err := sip.NewAck(tx.req, res)
 		if err != nil {
-			tx.fail(err)
+			tx.failClient(err)
 			return
 		}
 
@@ -250,7 +283,7 @@ func (tx *ClientTransaction) sendAck() {
 
 func (tx *ClientTransaction) sendResult(err error) {
 	if err != nil {
-		tx.fail(err)
+		tx.failClient(err)
 	}
 }
 
@@ -286,13 +319,13 @@ func (tx *ClientTransaction) retransmitTimer() {
 
 func (tx *ClientTransaction) timeoutTimer() {
 	if tx.pending() {
-		tx.fail(ErrTimeout)
+		tx.failClient(ErrTimeout)
 	}
 }
 
 func (tx *ClientTransaction) cancelTimer() {
 	if tx.state == Proceeding {
-		tx.fail(ErrTimeout)
+		tx.failClient(ErrTimeout)
 	}
 }
 

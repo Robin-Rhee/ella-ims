@@ -40,10 +40,11 @@ func TestPolicySignallingSession(t *testing.T) {
 
 				s.pol.wantEnd(session, rx.TerminationLogout)
 
-				// The session was opened and closed, each with a request answered with success.
-				if n := s.peerRequests(t, iface, "success"); n < 2 {
-					t.Errorf("%s requests answered with success = %v, want at least 2", iface, n)
-				}
+				// The session was opened and closed, each with a request answered with success: the answer to the
+				// closing one counted once the IMS takes it, after the policy function got the request.
+				eventually(t, iface+" requests answered with success", func() bool {
+					return s.peerRequests(t, iface, "success") >= 2
+				})
 			})
 		}
 	})
@@ -79,6 +80,10 @@ func TestPolicySessionEndsWithTheNetworkDeregistration(t *testing.T) {
 		s.register(u)
 
 		session := s.pol.signalling(ueAddr(0, false))
+
+		// The P-CSCF learns of the network's deregistration from its reg event subscription (TS 24.229 §5.2.3,
+		// §5.2.5.2), which it makes once the registration is done: an RTR before it, the subscription is refused.
+		eventually(t, "the P-CSCF's reg event subscription", func() bool { return s.subscribers()[db.SubscriberPCSCF] })
 
 		if _, err := s.hss.RTR(s.ctx(), cx.DeregistrationReason{Code: cx.ReasonPermanentTermination}, impi); err != nil {
 			t.Fatal(err)
@@ -129,9 +134,9 @@ func TestPolicySignallingAborted(t *testing.T) {
 			return ok && reg.SignallingLost && reg.Policy.ID == ""
 		})
 
-		if err := s.pol.abort(session); err == nil {
-			t.Fatal("the ended session was aborted again")
-		}
+		// RFC 6733 §8.1: until the answer to its termination ends it, the session takes an abort again, answered without
+		// another termination; then it is unknown.
+		eventually(t, "the ended session unknown to an abort", func() bool { return s.pol.abort(session) != nil })
 
 		if err := u.Reregister(s.ctx()); err != nil {
 			t.Fatal(err)

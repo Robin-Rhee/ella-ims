@@ -402,10 +402,13 @@ type Agent struct {
 	closing int
 
 	// mu guards the tables of the agent. A strand's lock may be held when taking it, not the other way.
-	mu          sync.Mutex
-	closed      bool
-	dialogs     map[dialog.ID]*dialogEntry
-	invites     map[*transaction.ServerTransaction]*Request
+	mu      sync.Mutex
+	closed  bool
+	dialogs map[dialog.ID]*dialogEntry
+	invites map[*transaction.ServerTransaction]*Request
+	// arriving are the strands the initial INVITEs are on their way to, before invites has them: a CANCEL meanwhile
+	// follows its INVITE there (RFC 3261 §9.2).
+	arriving    map[*transaction.ServerTransaction]*Strand
 	initials    map[mergeKey]*transaction.ServerTransaction
 	outgoing    map[*Outgoing]struct{}
 	subscribing map[subscribeKey]*subscribing
@@ -438,6 +441,7 @@ func New(cfg Config) (*Agent, error) {
 		supported: []string{sip.OptionTag100rel, sip.OptionTagTimer},
 		dialogs:   map[dialog.ID]*dialogEntry{},
 		invites:   map[*transaction.ServerTransaction]*Request{},
+		arriving:  map[*transaction.ServerTransaction]*Strand{},
 		initials:  map[mergeKey]*transaction.ServerTransaction{},
 		outgoing:  map[*Outgoing]struct{}{},
 
@@ -712,6 +716,64 @@ func (a *Agent) Shutdown(ctx context.Context) error {
 	return err
 }
 
+// Drop ends everything of the agent under way, sending nothing on its behalf: the transactions of the flows match
+// reports at once (transaction.Layer.Drop), then, on their strands, its INVITEs, sessions, requests, subscriptions,
+// notifiers and publications, with EndDropped or ErrDropped. The application knows the flow they depend on failed, as
+// a UE whose registration's flow failed stops processing its dialogs and transactions (TS 24.229 §5.1.1.4.1). Drop
+// waits for no strand, so a handler may call it. The agent goes on with what the application starts afterwards.
+func (a *Agent) Drop(match func(sip.Flow) bool) {
+	// The transactions first: what ending the usages would still answer or send is refused.
+	a.layer.Drop(match)
+
+	type ending struct {
+		st  *Strand
+		end func()
+	}
+
+	var ends []ending
+
+	a.mu.Lock()
+
+	for o := range a.outgoing {
+		ends = append(ends, ending{o.st, o.dropped})
+	}
+
+	dropped := End{Cause: EndDropped}
+
+	for _, e := range a.dialogs {
+		if s := e.invite; s != nil {
+			ends = append(ends, ending{s.st, func() { s.end(dropped) }})
+		}
+
+		for _, s := range e.subs {
+			ends = append(ends, ending{s.st, func() { s.end(dropped) }})
+		}
+
+		for _, n := range e.notifs {
+			ends = append(ends, ending{n.st, func() { n.end(dropped) }})
+		}
+	}
+
+	for _, att := range a.subscribing {
+		s := att.first
+		ends = append(ends, ending{s.st, func() { s.end(dropped) }})
+	}
+
+	for p := range a.pubs {
+		ends = append(ends, ending{p.st, func() { p.end(dropped) }})
+	}
+
+	for c := range a.requests {
+		ends = append(ends, ending{c.st, func() { c.finish(nil, transaction.ErrDropped) }})
+	}
+
+	a.mu.Unlock()
+
+	for _, e := range ends {
+		e.st.post(e.end)
+	}
+}
+
 func (a *Agent) allowValue() string {
 	return strings.Join(a.allow, ", ")
 }
@@ -815,6 +877,8 @@ func (a *Agent) addSession(s *Session) {
 func (a *Agent) addIncoming(s *Session, r *Request) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	delete(a.arriving, r.tx)
 
 	if a.closed {
 		return false
@@ -1073,6 +1137,7 @@ func (a *Agent) untrack(r *Request) {
 	defer a.mu.Unlock()
 
 	delete(a.invites, r.tx)
+	delete(a.arriving, r.tx)
 }
 
 func (a *Agent) tracked(tx *transaction.ServerTransaction) *Request {
@@ -1230,7 +1295,12 @@ func (a *Agent) HandleRequest(tx *transaction.ServerTransaction, req *sip.Reques
 	}
 
 	if req.Method == "INVITE" {
+		a.mu.Lock()
+		a.arriving[tx] = st
+		a.mu.Unlock()
+
 		st.post(func() { a.invite(st, tx, req) })
+
 		return
 	}
 
@@ -1408,10 +1478,21 @@ func unmatchedNotify(req *sip.Request, subs []*Subscription) int {
 }
 
 // HandleCancel implements transaction.Handler: the transaction layer answered the CANCEL; the INVITE gets a 487
-// (RFC 3261 §9.2).
+// (RFC 3261 §9.2). A CANCEL that came before its INVITE reached its strand follows it there.
 func (a *Agent) HandleCancel(tx *transaction.ServerTransaction, cancel *sip.Request) {
-	if r := a.tracked(tx); r != nil {
+	a.mu.Lock()
+	r, st := a.invites[tx], a.arriving[tx]
+	a.mu.Unlock()
+
+	switch {
+	case r != nil:
 		r.st.post(func() { r.cancelled(cancel) })
+	case st != nil:
+		st.post(func() {
+			if r := a.tracked(tx); r != nil {
+				r.cancelled(cancel)
+			}
+		})
 	}
 }
 

@@ -44,6 +44,10 @@ var (
 	ErrNoListener = errors.New("sip/transport: no listener on the local address")
 
 	ErrUnsupportedTransport = errors.New("sip/transport: unsupported transport")
+
+	// ErrConnectionLost is the error of a TCP connection that ended: closed or reset by the other end, failed, or
+	// closed idle (OnConnectionLost).
+	ErrConnectionLost = errors.New("sip/transport: connection lost")
 )
 
 type Handler interface {
@@ -83,6 +87,12 @@ type Config struct {
 	// error: the transport closed both and forgot the listener, sends from local failing with ErrNoListener, and local
 	// can be listened on again. It runs on a goroutine of its own; closing the transport is no failure.
 	OnListenerFailed func(local netip.AddrPort, err error)
+
+	// OnConnectionLost is told of a TCP connection of flow f that ended, with why, wrapping ErrConnectionLost: of an
+	// outbound registration, its flow failed (RFC 5626 §4.4). The transactions that sent on it are left to their
+	// timers: their responses can come on another connection (RFC 3261 §18.2.2). It runs on a goroutine of its own;
+	// closing the transport is no loss.
+	OnConnectionLost func(f sip.Flow, err error)
 }
 
 type Transport struct {
@@ -100,6 +110,7 @@ type Transport struct {
 	writeTimeout time.Duration
 	trace        func(m sip.Message, f sip.Flow, sent bool)
 	onFailed     func(local netip.AddrPort, err error)
+	onLost       func(f sip.Flow, err error)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -139,6 +150,7 @@ func New(cfg Config) *Transport {
 		writeTimeout: cfg.WriteTimeout,
 		trace:        cfg.Trace,
 		onFailed:     cfg.OnListenerFailed,
+		onLost:       cfg.OnConnectionLost,
 		listeners:    make(map[netip.AddrPort]*listener),
 		conns:        make(map[sip.Flow]*conn),
 		pongs:        newPongs(),

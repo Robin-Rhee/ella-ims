@@ -945,3 +945,54 @@ func TestListenHeldOrNotLocal(t *testing.T) {
 		t.Errorf("not local: %v", err)
 	}
 }
+
+// The end of a connection is told, with its flow, so that a UE detects the failure of its outbound registration's
+// flow (RFC 5626 §4.4); the transport's own closing is not.
+func TestConnectionLost(t *testing.T) {
+	type lost struct {
+		f   sip.Flow
+		err error
+	}
+
+	losses := make(chan lost, 2)
+	tr, _ := siptest.NewTransport(t, transport.Config{OnConnectionLost: func(f sip.Flow, err error) {
+		losses <- lost{f, err}
+	}})
+	local := siptest.Listen(t, tr, lo)
+	peer := siptest.NewSocket(t, netip.AddrPortFrom(lo, 0))
+
+	req := siptest.NewRequest("OPTIONS", "sip:a@"+peer.Addr().String(), sip.TCP, local)
+	req.Flow = sip.Flow{Transport: sip.TCP, Local: local, Remote: peer.Addr()}
+
+	if err := tr.Send(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+
+	peer.RecvRequest()
+	peer.CloseConn(local)
+
+	select {
+	case l := <-losses:
+		if l.f != req.Flow || !errors.Is(l.err, transport.ErrConnectionLost) {
+			t.Fatalf("lost %v %v, want %v", l.f, l.err, req.Flow)
+		}
+	case <-time.After(siptest.Timeout):
+		t.Fatal("loss not told")
+	}
+
+	if err := tr.Send(context.Background(), req); err != nil {
+		t.Fatalf("send after the loss: %v", err)
+	}
+
+	peer.RecvRequest()
+
+	if err := tr.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case l := <-losses:
+		t.Fatalf("closing the transport told a loss: %v", l.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+}

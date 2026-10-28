@@ -73,7 +73,8 @@ const (
 	// EndUnsubscribed: the application ended the subscription before its first NOTIFY, or the SUBSCRIBE that ends it
 	// failed.
 	EndUnsubscribed
-	// EndDropped: the application ended the subscription without the network: Drop, or a NOTIFY it refused.
+	// EndDropped: the application ended the subscription without the network: Drop, or a NOTIFY it refused; or the
+	// session, the subscription or the publication with all of the agent's (Agent.Drop).
 	EndDropped
 	// EndNoSubscription: the 2xx to a REFER said it created no subscription (RFC 4488, RFC 7614).
 	EndNoSubscription
@@ -82,7 +83,24 @@ const (
 	// EndFailed: a local failure, of the agent or the application, ended it, the peer still knowing it; End.Err
 	// tells which: an ACK that could not be sent, a NOTIFY that could not be built.
 	EndFailed
+	// EndTransport: a fatal transport error of a transaction ended it, which the agent takes as a 503 (Service
+	// Unavailable), not as the timeout of EndTimeout, a 408 (RFC 3261 §8.1.3.1); End.Err wraps
+	// transaction.ErrTransport.
+	EndTransport
 )
+
+// failureEnd is the end of a usage whose transaction failed with err: dropped with the agent's (Agent.Drop), failed
+// in transport, or timed out.
+func failureEnd(err error) End {
+	switch {
+	case errors.Is(err, transaction.ErrDropped):
+		return End{Cause: EndDropped, Err: err}
+	case errors.Is(err, transaction.ErrTransport):
+		return End{Cause: EndTransport, Err: err}
+	}
+
+	return End{Cause: EndTimeout, Err: err}
+}
 
 func (c EndCause) String() string {
 	switch c {
@@ -116,13 +134,16 @@ func (c EndCause) String() string {
 		return "removed"
 	case EndFailed:
 		return "failed"
+	case EndTransport:
+		return "transport error"
 	}
 
 	return "EndCause(?)"
 }
 
 // End is how a session or a subscription ended. The causes of a session are EndBye, EndCancelled, EndRejected,
-// EndNotChosen, EndTimeout, EndLost, EndExpired, EndClosed and EndFailed; a subscription has the others as well.
+// EndNotChosen, EndTimeout, EndTransport, EndLost, EndExpired, EndClosed, EndDropped and EndFailed; a subscription has
+// the others as well.
 type End struct {
 	Cause EndCause
 

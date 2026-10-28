@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -285,7 +286,11 @@ func (t *Transport) adopt(c *conn, nc *net.TCPConn) {
 
 func (t *Transport) readTCP(c *conn) {
 	defer t.wg.Done()
-	defer t.forget(c)
+
+	// cause is why the connection ends: an error of the other end or of the network, or the transport's own closing.
+	var cause error
+
+	defer func() { t.forget(c, cause) }()
 
 	sr := sip.NewStreamReader(idleReader{c: c}, t.maxSize)
 
@@ -305,13 +310,17 @@ func (t *Transport) readTCP(c *conn) {
 			switch ka {
 			case sip.KeepalivePing:
 				if err := t.write(c, crlf); err != nil {
+					cause = err
 					return
 				}
 			case sip.KeepalivePong:
 				t.tcpPong(c)
 			}
 		case errors.As(err, &terr):
+			cause = err
+
 			t.tooLarge(c, terr)
+
 			return
 		case errors.As(err, &perr):
 			c.limit.Store(int64(t.idleTimeout))
@@ -320,11 +329,15 @@ func (t *Transport) readTCP(c *conn) {
 			t.log.Debug("closing idle SIP connection", slog.String("flow", c.flow.String()))
 			c.abort()
 
+			cause = errors.New("idle")
+
 			return
 		default:
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 				t.log.Debug("SIP connection closed", slog.String("flow", c.flow.String()), slog.Any("error", err))
 			}
+
+			cause = err
 
 			return
 		}
@@ -361,14 +374,24 @@ func tooLargeResponse(req *sip.Request) *sip.Response {
 	return res
 }
 
-func (t *Transport) forget(c *conn) {
+// forget closes c, ended by cause, and tells OnConnectionLost, unless the transport closed it.
+func (t *Transport) forget(c *conn, cause error) {
 	c.close()
 
 	t.mu.Lock()
+
 	if t.conns[c.flow] == c {
 		delete(t.conns, c.flow)
 	}
+
+	closed := t.closed
 	t.mu.Unlock()
+
+	if closed || t.onLost == nil {
+		return
+	}
+
+	go t.onLost(c.flow, fmt.Errorf("%w: %s: %w", ErrConnectionLost, c.flow, cause))
 }
 
 type idleReader struct {
